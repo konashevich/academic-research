@@ -1,0 +1,130 @@
+{
+  "name": "academic-research",
+  "displayName": "Academic Research Assistant",
+  "description": "Template-aware academic citation and reference workflow assistant for VS Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:academicResearch.showProjectStatus",
+    "onCommand:academicResearch.findCitationForSelection",
+    "onCommand:academicResearch.verifyCitations",
+    "onCommand:academicResearch.syncBibliography",
+    "onCommand:academicResearch.buildDraftPdf",
+    "onCommand:academicResearch.buildPdf",
+    "onCommand:academicResearch.switchTarget",
+    "onCommand:academicResearch.addSelectionToRegister"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "academicResearch.showProjectStatus",
+        "title": "Academic Research: Show Project Status"
+      },
+      {
+        "command": "academicResearch.findCitationForSelection",
+        "title": "Academic Research: Find Citation for Selection"
+      },
+      {
+        "command": "academicResearch.verifyCitations",
+        "title": "Academic Research: Verify Citations"
+      },
+      {
+        "command": "academicResearch.syncBibliography",
+        "title": "Academic Research: Sync Bibliography"
+      },
+      {
+        "command": "academicResearch.buildDraftPdf",
+        "title": "Academic Research: Build Draft PDF"
+      },
+      {
+        "command": "academicResearch.buildPdf",
+        "title": "Academic Research: Build PDF"
+      },
+      {
+        "command": "academicResearch.switchTarget",
+        "title": "Academic Research: Switch Target"
+      },
+      {
+        "command": "academicResearch.addSelectionToRegister",
+        "title": "Academic Research: Add Selection to Reference Register"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "academicResearch.findCitationForSelection",
+          "when": "editorHasSelection && resourceExtname == .md",
+          "group": "navigation@20"
+        },
+        {
+          "command": "academicResearch.addSelectionToRegister",
+          "when": "editorHasSelection && resourceExtname == .md",
+          "group": "navigation@21"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "academicResearch",
+          "title": "Academic Research",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "academicResearch": [
+        {
+          "id": "academicResearch.projectStatus",
+          "name": "Project Status"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Academic Research Assistant",
+      "properties": {
+        "academicResearch.enableOpenAlex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Search OpenAlex when no suitable local bibliography item is found."
+        },
+        "academicResearch.enableZoteroMcp": {
+          "type": "boolean",
+          "default": true,
+          "description": "Search Zotero MCP and use it for bibliography sync when available."
+        },
+        "academicResearch.enableScholarMcp": {
+          "type": "boolean",
+          "default": true,
+          "description": "Search Google Scholar MCP when available."
+        },
+        "academicResearch.openAlexEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Optional email address sent to OpenAlex as a polite mailto parameter."
+        },
+        "academicResearch.autoVerifyOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh citation diagnostics when the active manuscript is saved."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:extension": "xvfb-run -a node tests/run-vscode-smoke.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^2.5.2"
+  }
+}

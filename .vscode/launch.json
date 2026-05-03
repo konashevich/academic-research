@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Academic Research Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "/mnt/merged_ssd/Papers/academic-paper-template"
+      ],
+      "outFiles": []
+    }
+  ]
+}

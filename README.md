@@ -31,6 +31,7 @@ mcp:
 Implemented MCP features:
 
 - Zotero citation suggestions via `zotero_suggest_citations`
+- Zotero item creation for external results via `zotero_create_item`
 - Zotero bibliography sync via `zotero_export_bibliography_content`
 - Google Scholar search via `search_google_scholar_key_words`
 

@@ -338,7 +338,7 @@ async function findCitationForSelection() {
     return;
   }
 
-  await handleExternalResult(project, selectedText, picked.result);
+  await handleExternalResult(project, editor, selectedText, picked.result);
 }
 
 async function addMcpSearchResults(label, results, search) {
@@ -379,8 +379,20 @@ async function handleZoteroResult(project, editor, selectedText, result) {
   }
 }
 
-async function handleExternalResult(project, claim, result) {
-  const actions = ["Add to Reference Register"];
+function formatCandidateSource(result) {
+  return [result.title, result.doi || result.url].filter(Boolean).join(" / ");
+}
+
+async function handleExternalResult(project, editor, claim, result) {
+  const config = vscode.workspace.getConfiguration("academicResearch");
+  const actions = [];
+
+  if (config.get("enableZoteroMcp", true)) {
+    actions.push("Import to Zotero, Sync, and Insert");
+  }
+
+  actions.push("Add to Reference Register");
+
   if (result.url) {
     actions.push("Open Source URL");
   }
@@ -393,9 +405,10 @@ async function handleExternalResult(project, claim, result) {
     placeHolder: "This source is not in the local bibliography yet."
   });
 
-  if (picked === "Add to Reference Register") {
-    const candidate = [result.title, result.doi || result.url].filter(Boolean).join(" / ");
-    const id = await addClaimToRegister(project, claim, claim, candidate, "candidate-found");
+  if (picked === "Import to Zotero, Sync, and Insert") {
+    await importExternalResult(project, editor, claim, result);
+  } else if (picked === "Add to Reference Register") {
+    const id = await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "candidate-found");
     vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
   } else if (picked === "Open Source URL" && result.url) {
     vscode.env.openExternal(vscode.Uri.parse(result.url));
@@ -403,6 +416,48 @@ async function handleExternalResult(project, claim, result) {
     await vscode.env.clipboard.writeText(result.doi);
     vscode.window.showInformationMessage("DOI copied.");
   }
+}
+
+async function importExternalResult(project, editor, claim, result) {
+  let created;
+
+  try {
+    created = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Importing source to Zotero",
+        cancellable: false
+      },
+      async () => {
+        const zotero = new ZoteroMcpClient(project);
+        try {
+          return await zotero.createItemFromResult(result, claim);
+        } finally {
+          await zotero.close();
+        }
+      }
+    );
+  } catch (error) {
+    logError("Zotero MCP source import failed", error);
+    const add = "Add to Register";
+    const picked = await vscode.window.showWarningMessage("Could not import source to Zotero. See the Academic Research output.", add);
+    if (picked === add) {
+      const id = await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "candidate-found");
+      vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
+    }
+    return;
+  }
+
+  const synced = await syncBibliography(project);
+  if (!synced) {
+    vscode.window.showWarningMessage(`Imported @${created.key}, but bibliography sync failed. See the Academic Research output.`);
+    return;
+  }
+
+  await insertCitationForSelection(editor, claim, created.key);
+  await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "inserted", created.key, { open: false });
+  refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
+  vscode.window.showInformationMessage(`Imported @${created.key}, synced bibliography, and inserted citation.`);
 }
 
 async function addSelectionToRegister() {
@@ -422,13 +477,18 @@ async function addSelectionToRegister() {
   vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
 }
 
-async function addClaimToRegister(project, claim, query, candidateSource = "", status = "needed") {
+async function addClaimToRegister(project, claim, query, candidateSource = "", status = "needed", zoteroKey = "", options = {}) {
   const id = appendRegisterEntry(project.paths.referenceRegister, {
     claim,
     query,
     candidateSource,
-    status
+    status,
+    zoteroKey
   });
+
+  if (options.open === false) {
+    return id;
+  }
 
   const document = await vscode.workspace.openTextDocument(project.paths.referenceRegister);
   await vscode.window.showTextDocument(document, { preview: false });

@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const { McpSseClient, extractJsonFromToolText, toolText } = require("./mcpSseClient");
 
 function makeZoteroBaseUrl(project) {
@@ -50,6 +51,61 @@ function normalizeCslIdsToZoteroKeys(content) {
   return JSON.stringify(items, null, 2);
 }
 
+function cleanValue(value) {
+  return String(value || "").trim();
+}
+
+function buildWriteToken(result, claim) {
+  const fingerprint = [result.doi, result.url, result.id, result.title, claim].map(cleanValue).filter(Boolean).join("|");
+  return `academic-research-${crypto.createHash("sha256").update(fingerprint).digest("hex").slice(0, 32)}`;
+}
+
+function buildZoteroCreateItemArgs(result, claim = "") {
+  const fields = {
+    title: cleanValue(result.title),
+    creators: Array.isArray(result.authors)
+      ? result.authors.map((author) => ({ creatorType: "author", name: cleanValue(author) })).filter((author) => author.name)
+      : []
+  };
+
+  const fieldMappings = [
+    ["date", result.year],
+    ["publicationTitle", result.venue],
+    ["DOI", result.doi],
+    ["url", result.url],
+    ["abstractNote", result.abstract]
+  ];
+
+  for (const [field, value] of fieldMappings) {
+    const cleaned = cleanValue(value);
+    if (cleaned) {
+      fields[field] = cleaned;
+    }
+  }
+
+  return {
+    itemType: "journalArticle",
+    fields,
+    tags: ["academic-research", result.source ? `source:${result.source}` : "source:external"],
+    writeToken: buildWriteToken(result, claim)
+  };
+}
+
+function parseCreatedZoteroKey(text) {
+  const jsonBlock = String(text || "").match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (jsonBlock) {
+    try {
+      const parsed = JSON.parse(jsonBlock[1]);
+      if (parsed && typeof parsed.key === "string" && parsed.key.trim()) {
+        return parsed.key.trim();
+      }
+    } catch (_error) {}
+  }
+
+  const keyLine = String(text || "").match(/(?:Key|already existed):\s*`([^`]+)`/i);
+  return keyLine ? keyLine[1].trim() : "";
+}
+
 class ZoteroMcpClient {
   constructor(project) {
     this.client = new McpSseClient(makeZoteroBaseUrl(project), {
@@ -96,11 +152,25 @@ class ZoteroMcpClient {
       warnings: payload.warnings || []
     };
   }
+
+  async createItemFromResult(result, claim = "") {
+    const toolResult = await this.client.callTool("zotero_create_item", buildZoteroCreateItemArgs(result, claim), 60000);
+    const text = toolText(toolResult);
+    const key = parseCreatedZoteroKey(text);
+
+    if (!key) {
+      throw new Error(text || "Zotero did not return a created item key.");
+    }
+
+    return { key, text };
+  }
 }
 
 module.exports = {
+  buildZoteroCreateItemArgs,
   ZoteroMcpClient,
   makeZoteroBaseUrl,
   normalizeCslIdsToZoteroKeys,
+  parseCreatedZoteroKey,
   parseZoteroSearchResults
 };

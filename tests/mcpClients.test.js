@@ -3,7 +3,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { parseSseEvents } = require("../src/mcpSseClient");
-const { normalizeCslIdsToZoteroKeys, parseZoteroSearchResults } = require("../src/zoteroMcpClient");
+const {
+  buildZoteroCreateItemArgs,
+  normalizeCslIdsToZoteroKeys,
+  parseCreatedZoteroKey,
+  parseZoteroSearchResults
+} = require("../src/zoteroMcpClient");
 const { normalizeScholarResults } = require("../src/scholarMcpClient");
 
 test("parses SSE events with CRLF separators", () => {
@@ -34,6 +39,32 @@ test("normalizes Zotero library-prefixed CSL ids to item keys", () => {
   const parsed = JSON.parse(content);
 
   assert.deepEqual(parsed.map((item) => item.id), ["PI76NP4W", "PLAINKEY"]);
+});
+
+test("builds Zotero create item args from an external result", () => {
+  const args = buildZoteroCreateItemArgs({
+    source: "OpenAlex",
+    title: "Academic Source",
+    authors: ["Jane Smith"],
+    year: "2024",
+    venue: "Journal of Testing",
+    doi: "10.1234/example",
+    url: "https://example.test/source",
+    abstract: "Useful abstract."
+  }, "claim text");
+
+  assert.equal(args.itemType, "journalArticle");
+  assert.equal(args.fields.title, "Academic Source");
+  assert.deepEqual(args.fields.creators, [{ creatorType: "author", name: "Jane Smith" }]);
+  assert.equal(args.fields.DOI, "10.1234/example");
+  assert.equal(args.fields.publicationTitle, "Journal of Testing");
+  assert.deepEqual(args.tags, ["academic-research", "source:OpenAlex"]);
+  assert.match(args.writeToken, /^academic-research-[a-f0-9]{32}$/);
+});
+
+test("parses created Zotero key from MCP tool text", () => {
+  assert.equal(parseCreatedZoteroKey("## ✅ Item created\nKey: `NEWKEY`"), "NEWKEY");
+  assert.equal(parseCreatedZoteroKey("```json\n{\"key\":\"JSONKEY\"}\n```"), "JSONKEY");
 });
 
 test("normalizes Google Scholar structured results", () => {

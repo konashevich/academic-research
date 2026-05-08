@@ -12,11 +12,15 @@ const { appendRegisterEntry } = require("./registerStore");
 const { searchOpenAlex } = require("./openAlexClient");
 const { ZoteroMcpClient } = require("./zoteroMcpClient");
 const { ScholarMcpClient } = require("./scholarMcpClient");
+const { renderCitationSearchHtml } = require("./citationSearchPanel");
 
 let diagnostics;
 let statusBarItem;
 let statusProvider;
 let outputChannel;
+let extensionContext;
+let citationPanel;
+let currentCitationSession;
 
 class ProjectStatusProvider {
   constructor() {
@@ -69,6 +73,7 @@ function treeItem(label, description) {
 }
 
 function activate(context) {
+  extensionContext = context;
   diagnostics = vscode.languages.createDiagnosticCollection("academicResearch");
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 80);
   statusBarItem.command = "academicResearch.showProjectStatus";
@@ -215,7 +220,8 @@ function getSelectedText() {
     return null;
   }
 
-  return editor.document.getText(selection).trim();
+  const text = editor.document.getText(selection);
+  return text.trim() ? text : null;
 }
 
 function resultDetail(result) {
@@ -231,6 +237,177 @@ function resultDescription(result) {
   return result.doi ? `${result.source} | DOI ${result.doi}` : result.source;
 }
 
+function makeNonce() {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let text = "";
+  for (let index = 0; index < 32; index += 1) {
+    text += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return text;
+}
+
+function getSelectionSnapshot(editor) {
+  return {
+    documentUri: editor.document.uri.toString(),
+    start: editor.document.offsetAt(editor.selection.start),
+    end: editor.document.offsetAt(editor.selection.end),
+    text: editor.document.getText(editor.selection)
+  };
+}
+
+async function restoreSearchEditor(session) {
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(session.selection.documentUri));
+  const documentLength = document.getText().length;
+  if (session.selection.start > documentLength || session.selection.end > documentLength) {
+    throw new Error("The original manuscript selection no longer exists. Select the claim and search again.");
+  }
+
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  const selection = new vscode.Selection(
+    document.positionAt(session.selection.start),
+    document.positionAt(session.selection.end)
+  );
+  const currentText = document.getText(selection);
+  if (currentText !== session.selection.text) {
+    throw new Error("The selected manuscript text changed after this search. Select the claim and search again.");
+  }
+
+  editor.selection = selection;
+  editor.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  return editor;
+}
+
+function normalizeResultKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/^https?:\/\/doi\.org\//, "")
+    .replace(/^doi:\s*/, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function dedupeCitationResults(results) {
+  const seen = new Set();
+  const deduped = [];
+
+  for (const result of results) {
+    const key = normalizeResultKey(result.doi)
+      || normalizeResultKey(result.url)
+      || [normalizeResultKey(result.title), normalizeResultKey(result.year)].filter(Boolean).join("|");
+    if (key && seen.has(key)) {
+      continue;
+    }
+    if (key) {
+      seen.add(key);
+    }
+    deduped.push(result);
+  }
+
+  return deduped;
+}
+
+function openCitationSearchPanel(session) {
+  currentCitationSession = session;
+
+  if (!citationPanel) {
+    citationPanel = vscode.window.createWebviewPanel(
+      "academicResearchCitationSearch",
+      "Citation Search",
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+    extensionContext.subscriptions.push(citationPanel);
+    citationPanel.onDidDispose(() => {
+      citationPanel = null;
+      currentCitationSession = null;
+    });
+    citationPanel.webview.onDidReceiveMessage((message) => {
+      handleCitationPanelMessage(message)
+        .catch((error) => {
+          logError("Citation panel action failed", error);
+          vscode.window.showErrorMessage(`Citation action failed: ${error.message}`);
+        })
+        .finally(() => {
+          if (citationPanel) {
+            citationPanel.webview.postMessage({ type: "actionComplete" });
+          }
+        });
+    });
+  } else {
+    citationPanel.reveal(vscode.ViewColumn.Beside);
+  }
+
+  citationPanel.title = "Citation Search";
+  citationPanel.webview.html = renderCitationSearchHtml({
+    nonce: makeNonce(),
+    claim: session.claim,
+    results: session.results,
+    canImportToZotero: session.canImportToZotero
+  });
+}
+
+async function handleCitationPanelMessage(message) {
+  if (!message || message.type !== "action" || !currentCitationSession) {
+    return;
+  }
+
+  const project = currentCitationSession.project;
+  const claim = currentCitationSession.claim;
+  const selectedText = currentCitationSession.selectedText;
+
+  if (message.action === "registerClaim") {
+    const id = await addClaimToRegister(project, claim, currentCitationSession.queryText);
+    vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
+    return;
+  }
+
+  const result = currentCitationSession.results[message.index];
+  if (!result) {
+    return;
+  }
+
+  if (message.action === "open" && result.url) {
+    await vscode.env.openExternal(vscode.Uri.parse(result.url));
+    return;
+  }
+
+  if (message.action === "copyDoi" && result.doi) {
+    await vscode.env.clipboard.writeText(result.doi);
+    vscode.window.showInformationMessage("DOI copied.");
+    return;
+  }
+
+  if (message.action === "register") {
+    const id = await addClaimToRegister(project, claim, currentCitationSession.queryText, formatCandidateSource(result), "candidate-found");
+    vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
+    return;
+  }
+
+  const editor = await restoreSearchEditor(currentCitationSession);
+
+  if (message.action === "insert" && result.alreadyInBibliography && result.citekey) {
+    await insertCitationForSelection(editor, selectedText, result.citekey);
+    refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
+    return;
+  }
+
+  if (message.action === "syncInsert" && result.alreadyInZotero && result.citekey) {
+    const synced = await syncBibliography(project);
+    if (synced) {
+      await insertCitationForSelection(editor, selectedText, result.citekey);
+      refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
+    }
+    return;
+  }
+
+  if (message.action === "importInsert") {
+    await importExternalResult(project, editor, selectedText, result, claim);
+  }
+}
+
 async function findCitationForSelection() {
   const editor = vscode.window.activeTextEditor;
   const selectedText = getSelectedText();
@@ -239,6 +416,7 @@ async function findCitationForSelection() {
     vscode.window.showWarningMessage("Select manuscript text first.");
     return;
   }
+  const queryText = selectedText.trim();
 
   const project = getCurrentProject();
   if (!project.found) {
@@ -254,15 +432,15 @@ async function findCitationForSelection() {
     return;
   }
 
-  const localResults = searchBibliography(bibliography, selectedText, 8);
-  const results = [...localResults];
+  const localResults = searchBibliography(bibliography, queryText, 8);
+  let results = [...localResults];
   const config = vscode.workspace.getConfiguration("academicResearch");
 
   if (config.get("enableZoteroMcp", true)) {
     await addMcpSearchResults("Zotero MCP", results, async () => {
       const zotero = new ZoteroMcpClient(project);
       try {
-        return await zotero.search(selectedText, 6);
+        return await zotero.search(queryText, 6);
       } finally {
         await zotero.close();
       }
@@ -273,7 +451,7 @@ async function findCitationForSelection() {
     await addMcpSearchResults("Google Scholar MCP", results, async () => {
       const scholar = new ScholarMcpClient(project);
       try {
-        return await scholar.search(selectedText, 6);
+        return await scholar.search(queryText, 6);
       } finally {
         await scholar.close();
       }
@@ -289,7 +467,7 @@ async function findCitationForSelection() {
       },
       async () => {
         try {
-          const openAlexResults = await searchOpenAlex(selectedText, {
+          const openAlexResults = await searchOpenAlex(queryText, {
             limit: 8,
             email: config.get("openAlexEmail", "")
           });
@@ -301,44 +479,17 @@ async function findCitationForSelection() {
     );
   }
 
-  if (!results.length) {
-    const add = "Add to Register";
-    const picked = await vscode.window.showInformationMessage("No citation candidates found.", add);
-    if (picked === add) {
-      await addClaimToRegister(project, selectedText, selectedText);
-    }
-    return;
-  }
+  results = dedupeCitationResults(results);
 
-  const picked = await vscode.window.showQuickPick(
-    results.map((result) => ({
-      label: result.title || "(untitled source)",
-      description: resultDescription(result),
-      detail: resultDetail(result),
-      result
-    })),
-    {
-      title: "Select a citation candidate",
-      placeHolder: "Local bibliography results can be inserted immediately; external results can be registered."
-    }
-  );
-
-  if (!picked) {
-    return;
-  }
-
-  if (picked.result.alreadyInBibliography && picked.result.citekey) {
-    await insertCitationForSelection(editor, selectedText, picked.result.citekey);
-    refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
-    return;
-  }
-
-  if (picked.result.alreadyInZotero && picked.result.citekey) {
-    await handleZoteroResult(project, editor, selectedText, picked.result);
-    return;
-  }
-
-  await handleExternalResult(project, editor, selectedText, picked.result);
+  openCitationSearchPanel({
+    project,
+    claim: queryText,
+    queryText,
+    selectedText,
+    results,
+    selection: getSelectionSnapshot(editor),
+    canImportToZotero: config.get("enableZoteroMcp", true)
+  });
 }
 
 async function addMcpSearchResults(label, results, search) {
@@ -418,7 +569,7 @@ async function handleExternalResult(project, editor, claim, result) {
   }
 }
 
-async function importExternalResult(project, editor, claim, result) {
+async function importExternalResult(project, editor, selectedText, result, claim = selectedText.trim()) {
   let created;
 
   try {
@@ -454,7 +605,7 @@ async function importExternalResult(project, editor, claim, result) {
     return;
   }
 
-  await insertCitationForSelection(editor, claim, created.key);
+  await insertCitationForSelection(editor, selectedText, created.key);
   await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "inserted", created.key, { open: false });
   refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
   vscode.window.showInformationMessage(`Imported @${created.key}, synced bibliography, and inserted citation.`);

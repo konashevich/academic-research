@@ -20,18 +20,36 @@
     "onCommand:academicResearch.buildDraftPdf",
     "onCommand:academicResearch.buildPdf",
     "onCommand:academicResearch.switchTarget",
-    "onCommand:academicResearch.addSelectionToRegister"
+    "onCommand:academicResearch.addSelectionToRegister",
+    "onCommand:academicResearch.findCitationForClaim",
+    "onCommand:academicResearch.openWritingHub",
+    "onCommand:academicResearch.scaffoldPaperProject",
+    "onCommand:academicResearch.manageProfiles",
+    "onCommand:academicResearch.openProfilesFolder",
+    "onCommand:academicResearch.exportProfileToWorkspace",
+    "onCommand:academicResearch.cloneTargetProfile",
+    "onCommand:academicResearch.importProfileFromWorkspace"
   ],
   "main": "./src/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "academicResearch.openWritingHub",
+        "title": "Academic Research: Open Writing Hub"
+      },
       {
         "command": "academicResearch.showProjectStatus",
         "title": "Academic Research: Show Project Status"
       },
       {
         "command": "academicResearch.findCitationForSelection",
-        "title": "Academic Research: Find Citation for Selection"
+        "title": "Find Citation for Selection",
+        "category": "Academic Research"
+      },
+      {
+        "command": "academicResearch.findCitationForClaim",
+        "title": "Find Citation for Claim",
+        "category": "Academic Research"
       },
       {
         "command": "academicResearch.verifyCitations",
@@ -56,6 +74,37 @@
       {
         "command": "academicResearch.addSelectionToRegister",
         "title": "Academic Research: Add Selection to Reference Register"
+      },
+      {
+        "command": "academicResearch.scaffoldPaperProject",
+        "title": "Academic Research: Scaffold Paper Project"
+      },
+      {
+        "command": "academicResearch.manageProfiles",
+        "title": "Academic Research: Manage Paper Profiles"
+      },
+      {
+        "command": "academicResearch.openProfilesFolder",
+        "title": "Academic Research: Open Profiles Folder"
+      },
+      {
+        "command": "academicResearch.exportProfileToWorkspace",
+        "title": "Academic Research: Export Profile to Workspace"
+      },
+      {
+        "command": "academicResearch.cloneTargetProfile",
+        "title": "Academic Research: Clone Target Profile"
+      },
+      {
+        "command": "academicResearch.importProfileFromWorkspace",
+        "title": "Academic Research: Import Profile from Workspace"
+      }
+    ],
+    "keybindings": [
+      {
+        "key": "alt+shift+c",
+        "command": "academicResearch.findCitationForSelection",
+        "when": "editorHasSelection && editorLangId == markdown && editorTextFocus"
       }
     ],
     "menus": {
@@ -86,9 +135,20 @@
         {
           "id": "academicResearch.projectStatus",
           "name": "Project Status"
+        },
+        {
+          "type": "webview",
+          "id": "academicResearch.citationSearchHistory",
+          "name": "Citation Searches"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "academicResearch.projectStatus",
+        "contents": "No paper project detected yet.\n[Set up paper project](command:academicResearch.openWritingHub)\n[Scaffold paper project](command:academicResearch.scaffoldPaperProject)"
+      }
+    ],
     "configuration": {
       "title": "Academic Research Assistant",
       "properties": {
@@ -116,15 +176,89 @@
           "type": "boolean",
           "default": true,
           "description": "Refresh citation diagnostics when the active manuscript is saved."
+        },
+        "academicResearch.mcpMode": {
+          "type": "string",
+          "enum": [
+            "bundled",
+            "external"
+          ],
+          "default": "bundled",
+          "description": "Use extension-managed MCP services (bundled) or connect to external SSE servers."
+        },
+        "academicResearch.setupComplete": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether bundled infrastructure setup has completed successfully."
+        },
+        "academicResearch.mcpHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host for MCP SSE servers."
+        },
+        "academicResearch.zoteroPort": {
+          "type": "number",
+          "default": 9180,
+          "description": "Port for Zotero MCP when using external mode or after bundled startup."
+        },
+        "academicResearch.scholarPort": {
+          "type": "number",
+          "default": 3847,
+          "description": "Port for Google Scholar MCP when using external mode or after bundled startup."
+        },
+        "academicResearch.defaultTemplateId": {
+          "type": "string",
+          "default": "iade-default",
+          "description": "Bundled paper template id used when scaffolding a project."
+        },
+        "academicResearch.defaultTarget": {
+          "type": "string",
+          "default": "lncs",
+          "description": "Default journal/output target for new paper projects."
+        },
+        "academicResearch.autoOpenHubOnEmptyWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the Writing Hub when no paper.yaml is detected in the workspace."
+        },
+        "academicResearch.scaffoldDefaults": {
+          "type": "object",
+          "default": {},
+          "description": "Default scaffold form values and component toggles (manuscript, bibliography, makefile, instructions, vscode, csl, gitInit)."
+        },
+        "academicResearch.enableAgentRanking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Filter citation search results with a Cursor agent for relevance to the selected claim."
+        },
+        "academicResearch.agentRankingModel": {
+          "type": "string",
+          "default": "composer-2.5",
+          "description": "Cursor model used when ranking citation candidates."
+        },
+        "academicResearch.agentRankingMinScore": {
+          "type": "number",
+          "default": 40,
+          "description": "Minimum relevance score (0-100) to keep a candidate in the main results list."
+        },
+        "academicResearch.agentRankingTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "Timeout in milliseconds for the relevance-ranking agent."
         }
       }
     }
   },
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "test:extension": "xvfb-run -a node tests/run-vscode-smoke.js"
+    "test:extension": "xvfb-run -a node tests/run-vscode-smoke.js",
+    "package": "vsce package --out VSIX/ --allow-missing-repository"
   },
   "devDependencies": {
-    "@vscode/test-electron": "^2.5.2"
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.0"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.19"
   }
 }

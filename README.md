@@ -4,10 +4,21 @@ Template-aware VS Code extension for academic writing projects that follow the I
 
 The MVP detects `paper.yaml`, indexes `refs/bibliography.json`, inserts Pandoc citations, tracks unresolved citation needs in `refs/reference-register.md`, and wraps the template's `make verify`, `make sync`, `make draft`, `make pdf`, and `make switch` commands.
 
-When the paper template points to local MCP servers, the extension can also search Zotero, search Google Scholar, and sync `refs/bibliography.json` directly from Zotero MCP.
+## Quick start (new users)
+
+1. Install the extension in VS Code or Cursor.
+2. Run **Academic Research: Open Writing Hub** (opens automatically on first launch).
+3. Complete the **Infrastructure** step:
+   - installs portable MCP services via `uv`/`uvx` (no Docker required)
+   - stores your Zotero API key securely
+   - starts Zotero MCP and Google Scholar MCP locally
+4. Use citation commands in your Markdown manuscript.
+
+You need a [Zotero API key](https://www.zotero.org/settings/keys/new) with library read/write access and your numeric library ID.
 
 ## Commands
 
+- `Academic Research: Open Writing Hub`
 - `Academic Research: Show Project Status`
 - `Academic Research: Find Citation for Selection`
 - `Academic Research: Add Selection to Reference Register`
@@ -19,30 +30,40 @@ When the paper template points to local MCP servers, the extension can also sear
 
 ## MCP Integration
 
-For IADE-style projects, MCP connection details come from `paper.yaml`:
+### Bundled mode (default)
 
-```yaml
-mcp:
-  host: "${ACADEMIC_MCP_HOST:-localhost}"
-  zotero_port: 9180
-  scholar_port: 3847
-```
+The extension manages local MCP processes:
+
+- **Zotero MCP** via `uvx zotero-mcp --transport sse` (default port `8000`)
+- **Google Scholar MCP** via vendored server in `vendor/google-scholar-mcp/` (dynamic port)
+- **OpenAlex** via built-in HTTPS client (no local server)
+
+Credentials live in VS Code `SecretStorage`. Ports are written to settings after startup.
+
+After setup, use **Connect to AI chat** in the Hub to merge `.vscode/mcp.json` and `.cursor/mcp.json` in your workspace for Cursor/VS Code MCP clients.
+
+### External mode (advanced)
+
+Set `academicResearch.mcpMode` to `external` and configure host/ports manually. Legacy `paper.yaml` `mcp:` values still override when present.
 
 Implemented MCP features:
 
 - Zotero citation suggestions via `zotero_suggest_citations`
 - Zotero item creation for external results via `zotero_create_item`
-- Zotero bibliography sync via `zotero_export_bibliography_content`
+- Zotero bibliography sync via `zotero_resolve_citekeys` for citekeys used in the manuscript (not the full library)
 - Google Scholar search via `search_google_scholar_key_words`
 
-The Zotero export may return CSL IDs prefixed with a library id, such as `17365128/ABC123`. The extension normalizes those to the item key, such as `ABC123`, so inserted Pandoc citations remain compatible with the template verifier.
+The Zotero sync exports only citekeys cited in the project manuscript (plus any key being imported), using `zotero_resolve_citekeys` with per-item `zotero_item_metadata` fallback. CSL IDs prefixed with a library id, such as `17365128/ABC123`, are normalized to the item key, such as `ABC123`.
 
-Optional settings:
+### Settings
 
+- `academicResearch.mcpMode` — `bundled` or `external`
+- `academicResearch.setupComplete` — set after successful infrastructure verification
 - `academicResearch.enableZoteroMcp`
 - `academicResearch.enableScholarMcp`
 - `academicResearch.enableOpenAlex`
 - `academicResearch.openAlexEmail`
+- `academicResearch.mcpHost`, `academicResearch.zoteroPort`, `academicResearch.scholarPort`
 - `academicResearch.autoVerifyOnSave`
 
 ## Development

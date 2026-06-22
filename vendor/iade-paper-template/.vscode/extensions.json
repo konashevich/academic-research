@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "streetsidesoftware.code-spell-checker",
+    "DavidAnson.vscode-markdownlint",
+    "yzhang.markdown-all-in-one",
+    "bierner.markdown-footnotes",
+    "shd101wyy.markdown-preview-enhanced",
+    "James-Yu.latex-workshop",
+    "mhutchie.git-graph",
+    "eamodio.gitlens"
+  ]
+}

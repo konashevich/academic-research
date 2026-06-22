@@ -2,5 +2,11 @@
 .vscode-test/**
 tests/**
 docs/**
-node_modules/**
+VSIX/**
 *.vsix
+node_modules/**
+!node_modules/@cursor/**
+!node_modules/@bufbuild/**
+!node_modules/@connectrpc/**
+!node_modules/@statsig/**
+!node_modules/zod/**

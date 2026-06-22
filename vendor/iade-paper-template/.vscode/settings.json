@@ -1,0 +1,38 @@
+{
+  // ─── Markdown Preview ─────────────────────────────────────────────────────
+  "markdown.preview.breaks": true,
+  "markdown.preview.doubleClickToSwitchToEditor": true,
+  "markdown.preview.markEditorSelection": false,
+  "markdown.preview.scrollEditorWithPreview": false,
+  "markdown.preview.scrollPreviewWithEditor": false,
+  "markdown.preview.fontSize": 14,
+  "markdown.preview.lineHeight": 1.6,
+
+  // ─── Spell Checker ────────────────────────────────────────────────────────
+  // Language is set by init-project.sh (en-GB or en-US)
+  "cSpell.language": "en-GB",
+  "cSpell.enableFiletypes": ["markdown"],
+  "cSpell.words": [],
+
+  // ─── Markdownlint ─────────────────────────────────────────────────────────
+  "markdownlint.config": {
+    "MD033": false,  // inline HTML allowed (tables, formatting)
+    "MD013": false   // line length off for academic prose
+  },
+
+  // ─── Markdown Preview Enhanced (if installed) ─────────────────────────────
+  "markdown-preview-enhanced.scrollSync": false,
+
+  // ─── Files ────────────────────────────────────────────────────────────────
+  "files.exclude": {
+    "**/*.pdf": false,
+    "**/*.aux": true,
+    "**/*.log": true,
+    "**/*.bbl": true,
+    "**/*.blg": true,
+    "**/*.out": true,
+    "**/*.fls": true,
+    "**/*.fdb_latexmk": true,
+    "**/*.synctex.gz": true
+  }
+}

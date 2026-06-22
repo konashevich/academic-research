@@ -8,7 +8,7 @@ const { runTests } = require("@vscode/test-electron");
 async function main() {
   const extensionDevelopmentPath = path.resolve(__dirname, "..");
   const extensionTestsPath = path.resolve(__dirname, "vscode-smoke", "index.js");
-  const sourceTemplate = "/mnt/merged_ssd/Papers/academic-paper-template";
+  const sourceTemplate = path.resolve(__dirname, "..", "vendor", "iade-paper-template");
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "academic-research-vscode-"));
   const workspacePath = path.join(tempRoot, "paper-workspace");
   const userDataDir = path.join(tempRoot, "user-data");
@@ -36,7 +36,7 @@ async function main() {
       ]
     });
   } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 }
 

@@ -40,9 +40,15 @@ class McpSseClient {
     this.baseUrl = baseUrl.replace(/\/sse$/, "");
     this.clientName = options.clientName || "academic-research-vscode";
     this.clientVersion = options.clientVersion || "0.1.0";
+    this.connectTimeoutMs = options.connectTimeoutMs || 5000;
+    this.postTimeoutMs = options.postTimeoutMs || 10000;
+    this.requestTimeoutMs = options.requestTimeoutMs || 30000;
     this.requestId = 1;
     this.buffer = "";
     this.connected = false;
+    this.chunkQueue = [];
+    this.chunkWaiters = [];
+    this.streamEnded = false;
   }
 
   async connect() {
@@ -50,8 +56,8 @@ class McpSseClient {
       return;
     }
 
-    await this.openSseStream();
-    const endpoint = await this.readEndpoint();
+    await this.openSseStream(this.connectTimeoutMs);
+    const endpoint = await this.readEndpoint(this.connectTimeoutMs);
     this.endpoint = new URL(endpoint, this.baseUrl).toString();
 
     await this.sendRequest("initialize", {
@@ -61,7 +67,7 @@ class McpSseClient {
         name: this.clientName,
         version: this.clientVersion
       }
-    });
+    }, this.requestTimeoutMs);
     await this.notify("notifications/initialized", {});
     this.connected = true;
   }
@@ -76,7 +82,7 @@ class McpSseClient {
     this.connected = false;
   }
 
-  openSseStream() {
+  openSseStream(timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
       const url = new URL(`${this.baseUrl}/sse`);
       const transport = url.protocol === "https:" ? https : http;
@@ -85,6 +91,9 @@ class McpSseClient {
           accept: "text/event-stream"
         }
       });
+      const timeout = setTimeout(() => {
+        request.destroy(new Error("Timed out opening MCP SSE connection."));
+      }, timeoutMs);
 
       this.sseRequest = request;
       this.chunkQueue = [];
@@ -92,6 +101,7 @@ class McpSseClient {
       this.streamEnded = false;
 
       request.on("response", (response) => {
+        clearTimeout(timeout);
         if (response.statusCode < 200 || response.statusCode >= 300) {
           reject(new Error(`MCP SSE connection failed: ${response.statusCode}`));
           response.resume();
@@ -105,7 +115,10 @@ class McpSseClient {
         response.on("error", (error) => this.endStream(error));
         resolve();
       });
-      request.on("error", reject);
+      request.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
     });
   }
 
@@ -120,6 +133,7 @@ class McpSseClient {
 
   endStream(error) {
     this.streamEnded = true;
+    this.connected = false;
     while (this.chunkWaiters.length) {
       const waiter = this.chunkWaiters.shift();
       if (error) {
@@ -138,14 +152,7 @@ class McpSseClient {
       return Promise.resolve(null);
     }
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const index = this.chunkWaiters.findIndex((waiter) => waiter.resolve === resolve);
-        if (index !== -1) {
-          this.chunkWaiters.splice(index, 1);
-        }
-        reject(new Error("Timed out waiting for MCP response."));
-      }, timeoutMs);
-      this.chunkWaiters.push({
+      const waiter = {
         resolve: (value) => {
           clearTimeout(timeout);
           resolve(value);
@@ -154,7 +161,15 @@ class McpSseClient {
           clearTimeout(timeout);
           reject(error);
         }
-      });
+      };
+      const timeout = setTimeout(() => {
+        const index = this.chunkWaiters.indexOf(waiter);
+        if (index !== -1) {
+          this.chunkWaiters.splice(index, 1);
+        }
+        reject(new Error("Timed out waiting for MCP response."));
+      }, timeoutMs);
+      this.chunkWaiters.push(waiter);
     });
   }
 
@@ -182,14 +197,22 @@ class McpSseClient {
     throw new Error("Timed out waiting for MCP SSE endpoint.");
   }
 
-  async post(message) {
-    const response = await fetch(this.endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify(message)
-    });
+  async post(message, timeoutMs = this.postTimeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(this.endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(message),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!response.ok) {
       throw new Error(`MCP POST failed: ${response.status} ${await response.text()}`);
@@ -219,24 +242,30 @@ class McpSseClient {
     throw new Error("Timed out waiting for MCP response.");
   }
 
-  async request(method, params = {}, timeoutMs = 30000) {
+  async request(method, params = {}, timeoutMs = this.requestTimeoutMs) {
     await this.connectIfNeeded();
     return this.sendRequest(method, params, timeoutMs);
   }
 
-  async sendRequest(method, params = {}, timeoutMs = 30000) {
+  async sendRequest(method, params = {}, timeoutMs = this.requestTimeoutMs) {
     const id = this.requestId;
     this.requestId += 1;
+    const deadline = Date.now() + timeoutMs;
 
     await this.post({
       jsonrpc: "2.0",
       id,
       method,
       params
-    });
+    }, Math.min(this.postTimeoutMs, Math.max(1, deadline - Date.now())));
 
     while (true) {
-      const message = await this.nextMessage(timeoutMs);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`Timed out waiting for MCP response to ${method}.`);
+      }
+
+      const message = await this.nextMessage(remaining);
       if (message.id !== id) {
         continue;
       }
@@ -255,7 +284,7 @@ class McpSseClient {
     });
   }
 
-  async callTool(name, args = {}, timeoutMs = 30000) {
+  async callTool(name, args = {}, timeoutMs = this.requestTimeoutMs) {
     return this.request("tools/call", {
       name,
       arguments: args
@@ -281,6 +310,13 @@ function extractJsonFromToolText(text) {
   return JSON.parse(text);
 }
 
+function extractJsonFromToolResult(result) {
+  if (result && result.structuredContent && typeof result.structuredContent === "object") {
+    return result.structuredContent;
+  }
+  return extractJsonFromToolText(toolText(result));
+}
+
 function toolText(result) {
   return (result.content || [])
     .filter((part) => part.type === "text")
@@ -290,6 +326,7 @@ function toolText(result) {
 
 module.exports = {
   McpSseClient,
+  extractJsonFromToolResult,
   extractJsonFromToolText,
   parseSseEvents,
   splitSseEvent,

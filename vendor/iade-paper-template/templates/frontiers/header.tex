@@ -1,0 +1,40 @@
+% Frontiers in Blockchain header for Pandoc → PDF
+% Single-column, 11pt, A4, 2.5cm margins
+
+\usepackage[T1]{fontenc}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{graphicx}
+\usepackage{setspace}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{bookmark}
+
+% Line spacing
+\setstretch{1.15}
+
+% Section headings — Frontiers uses bold sans-serif
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titlespacing*{\section}{0pt}{12pt}{6pt}
+
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+
+\titleformat{\subsubsection}{\normalsize\bfseries\itshape}{\thesubsubsection}{1em}{}
+\titlespacing*{\subsubsection}{0pt}{8pt}{4pt}
+
+% Captions
+\captionsetup{
+  font={small,sf},
+  labelfont={bf},
+  singlelinecheck=false
+}
+
+\hypersetup{
+    unicode=true,
+    breaklinks=true,
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}

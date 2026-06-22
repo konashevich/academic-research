@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "zotero-mcp": {
+      "url": "http://localhost:9180/sse"
+    },
+    "google-scholar": {
+      "url": "http://localhost:3847/sse"
+    }
+  }
+}

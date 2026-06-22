@@ -1,0 +1,58 @@
+% Ledger Journal header for Pandoc → PDF
+% Single-column, Times font, specific Ledger margins and heading styles
+
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{scrextend}
+\usepackage{setspace}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{bookmark}
+
+% Note: geometry is set via paper.yaml → build.sh, not here.
+% If you need to override, uncomment and adjust:
+% \usepackage{geometry}
+% \geometry{a4paper, left=3.1cm, right=3.1cm, top=2.4cm, bottom=1.0cm}
+
+% 11.5pt body text
+\changefontsizes{11.5pt}
+\setstretch{1.0}
+\setlength{\parindent}{0.6cm}
+
+% Page headers/footers
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Customise these per submission:
+\fancyhead[L]{\fontsize{8pt}{10pt}\selectfont ledgerjournal.org}
+\fancyhead[R]{\fontsize{8pt}{10pt}\selectfont ISSN 2379-5980 (online)}
+\fancyfoot[C]{\thepage}
+
+% Section headings
+\titleformat{\section}{\fontsize{13pt}{15.6pt}\bfseries\filcenter}{\thesection.}{0.5em}{}
+\titlespacing*{\section}{0pt}{15pt}{7pt}
+
+\titleformat{\subsection}[runin]{\fontsize{11.5pt}{13.8pt}\itshape}{\thesubsection.}{0.5em}{}[---]
+\titlespacing*{\subsection}{0.6cm}{13.5pt}{1em}
+
+% Captions
+\captionsetup{
+  font={small},
+  labelfont={bf},
+  singlelinecheck=false,
+  margin=1.2cm
+}
+
+\hypersetup{
+    unicode=true,
+    breaklinks=true,
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}

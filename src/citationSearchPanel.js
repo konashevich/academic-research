@@ -32,6 +32,37 @@ function providerClass(source) {
     .replace(/^-|-$/g, "") || "source";
 }
 
+function renderProviderStatus(status) {
+  const state = status.skipped ? "skipped" : status.ok ? "ok" : "warn";
+  const detail = status.detail ? `: ${status.detail}` : "";
+  return `<span class="${state}">${escapeHtml(status.label)}${escapeHtml(detail)}</span>`;
+}
+
+const ACTION_DESCRIPTIONS = {
+  importInsert: "Add this paper to Zotero, sync the bibliography, and insert a citation at the cursor.",
+  insert: "Insert a citation from the existing bibliography entry at the cursor.",
+  syncInsert: "Sync the bibliography from Zotero, then insert a citation at the cursor.",
+  register: "Save this claim and candidate source to the reference register for later review.",
+  open: "Open the paper in your default browser.",
+  copyDoi: "Copy the DOI to your clipboard."
+};
+
+const INFO_ICON_SVG = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 7.25v3.5M8 5.25h.01" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+
+function renderActionButton(label, action, index, options = {}) {
+  const description = ACTION_DESCRIPTIONS[action] || "";
+  const primaryClass = options.primary ? ' class="primary"' : "";
+  const section = options.section ? ` data-section="${options.section}"` : "";
+  const infoIcon = description
+    ? `<span class="info-icon" tabindex="0" role="button" aria-label="${escapeHtml(description)}" data-tooltip="${escapeHtml(description)}">${INFO_ICON_SVG}</span>`
+    : "";
+
+  return `<div class="action-item">
+    <button${primaryClass} data-action="${action}" data-index="${index}"${section}>${escapeHtml(label)}</button>
+    ${infoIcon}
+  </div>`;
+}
+
 function renderResult(result, index, options) {
   const meta = [
     formatAuthors(result.authors),
@@ -40,6 +71,9 @@ function renderResult(result, index, options) {
   ].filter(Boolean).join(" | ");
   const badges = [
     result.source,
+    result.agentVerdict === "unranked" ? "Unranked" : "",
+    Number.isFinite(result.agentScore) ? `Relevance ${result.agentScore}` : "",
+    result.agentVerdict && !["weak", "unranked"].includes(result.agentVerdict) ? result.agentVerdict : "",
     result.alreadyInBibliography ? "In bibliography" : "",
     result.alreadyInZotero ? "In Zotero" : "",
     result.doi ? "DOI" : "",
@@ -47,16 +81,29 @@ function renderResult(result, index, options) {
     Number.isFinite(result.citationCount) && result.citationCount > 0 ? `${result.citationCount} citations` : ""
   ].filter(Boolean);
   const abstract = truncateText(result.abstract || "");
-  const primaryAction = result.alreadyInBibliography && result.citekey
-    ? `<button class="primary" data-action="insert" data-index="${index}">Insert</button>`
-    : result.alreadyInZotero && result.citekey
-      ? `<button class="primary" data-action="syncInsert" data-index="${index}">Sync + Insert</button>`
-      : options.canImportToZotero
-        ? `<button class="primary" data-action="importInsert" data-index="${index}">Import + Insert</button>`
-        : `<button class="primary" data-action="register" data-index="${index}">Register</button>`;
+  const agentReason = result.agentReason ? `<p class="agent-reason">${escapeHtml(result.agentReason)}</p>` : "";
+  const dropped = Boolean(options.dropped);
+  const section = options.section || "main";
+  const canImport = options.canImportToZotero && result.canImport !== false && !dropped;
+  const primaryAction = dropped
+    ? (result.alreadyInBibliography && result.citekey
+      ? renderActionButton("Insert", "insert", index, { primary: true, section })
+      : result.alreadyInZotero && result.citekey
+        ? renderActionButton("Sync + Insert", "syncInsert", index, { primary: true, section })
+        : renderActionButton("Register", "register", index, { primary: true, section }))
+    : result.alreadyInBibliography && result.citekey
+      ? renderActionButton("Insert", "insert", index, { primary: true, section })
+      : result.alreadyInZotero && result.citekey
+        ? renderActionButton("Sync + Insert", "syncInsert", index, { primary: true, section })
+        : canImport
+          ? renderActionButton("Import + Insert", "importInsert", index, { primary: true, section })
+          : renderActionButton("Register", "register", index, { primary: true, section });
+  const qualityWarning = !dropped && !result.alreadyInBibliography && !result.alreadyInZotero && !canImport && result.metadataQuality && result.metadataQuality.reasons.length
+    ? `<p class="warning">Import disabled: ${escapeHtml(result.metadataQuality.reasons.join(", "))}.</p>`
+    : "";
 
   return `
-    <article class="result ${providerClass(result.source)}">
+    <article class="result ${providerClass(result.source)}${dropped ? " dropped" : ""}">
       <div class="result-head">
         <div>
           <h2>${escapeHtml(result.title || "(untitled source)")}</h2>
@@ -67,24 +114,56 @@ function renderResult(result, index, options) {
         </div>
       </div>
       ${abstract ? `<p class="abstract">${escapeHtml(abstract)}</p>` : ""}
+      ${agentReason}
       <dl>
         ${result.citekey ? `<div><dt>Citekey</dt><dd>@${escapeHtml(result.citekey)}</dd></div>` : ""}
         ${result.doi ? `<div><dt>DOI</dt><dd>${escapeHtml(result.doi)}</dd></div>` : ""}
         ${result.url ? `<div><dt>URL</dt><dd>${escapeHtml(result.url)}</dd></div>` : ""}
       </dl>
+      ${qualityWarning}
       <div class="actions">
         ${primaryAction}
-        ${primaryAction.includes('data-action="register"') ? "" : `<button data-action="register" data-index="${index}">Register</button>`}
-        ${result.url ? `<button data-action="open" data-index="${index}">Open</button>` : ""}
-        ${result.doi ? `<button data-action="copyDoi" data-index="${index}">Copy DOI</button>` : ""}
+        ${dropped || primaryAction.includes('data-action="register"') ? "" : renderActionButton("Register", "register", index, { section })}
+        ${result.url ? renderActionButton("Open", "open", index, { section }) : ""}
+        ${result.doi ? renderActionButton("Copy DOI", "copyDoi", index, { section }) : ""}
       </div>
     </article>
   `;
 }
 
-function renderCitationSearchHtml({ nonce, claim, results, canImportToZotero = true }) {
+function renderCitationSearchHtml({
+  nonce,
+  sessionId = "",
+  claim,
+  results,
+  droppedResults = [],
+  expandDropped = false,
+  canImportToZotero = true,
+  providerStatuses = []
+}) {
   const safeClaim = escapeHtml(truncateText(claim, 900));
   const resultCount = results.length;
+  const droppedCount = droppedResults.length;
+  const providerStatusHtml = providerStatuses.length
+    ? `<div class="provider-status">${providerStatuses.map(renderProviderStatus).join("")}</div>`
+    : "";
+  const allFilteredHint = resultCount === 0 && droppedCount > 0
+    ? `<p class="warning">All candidates were filtered as low relevance. Review hidden results below or narrow your claim.</p>`
+    : "";
+  const droppedSection = droppedCount
+    ? `<section class="dropped-section">
+      <button type="button" class="dropped-toggle" id="dropped-toggle" aria-expanded="${expandDropped ? "true" : "false"}">
+        Hidden by agent (${droppedCount})
+      </button>
+      <div class="dropped-panel${expandDropped ? " open" : ""}" id="dropped-panel">
+        ${droppedResults.map((result, index) => renderResult(result, index, {
+          canImportToZotero,
+          dropped: true,
+          section: "dropped"
+        })).join("")}
+      </div>
+    </section>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -206,6 +285,56 @@ function renderCitationSearchHtml({ nonce, claim, results, canImportToZotero = t
       flex-wrap: wrap;
       gap: 8px;
       margin-top: 16px;
+      align-items: center;
+    }
+    .action-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .info-icon {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      color: var(--muted);
+      cursor: help;
+      outline: none;
+    }
+    .info-icon:hover,
+    .info-icon:focus-visible {
+      color: var(--vscode-editor-foreground);
+      background: color-mix(in srgb, var(--border) 45%, transparent);
+    }
+    .info-icon::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      width: max-content;
+      max-width: 240px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--vscode-editorHoverWidget-background, var(--surface));
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-editor-foreground));
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      font-size: 12px;
+      line-height: 1.4;
+      text-align: left;
+      white-space: normal;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease;
+      z-index: 2;
+    }
+    .info-icon:hover::after,
+    .info-icon:focus-visible::after {
+      opacity: 1;
     }
     button {
       border: 1px solid var(--border);
@@ -231,6 +360,55 @@ function renderCitationSearchHtml({ nonce, claim, results, canImportToZotero = t
     button.primary:hover {
       background: var(--hover);
     }
+    .warning {
+      margin: 12px 0 0;
+      color: var(--vscode-inputValidation-warningForeground, var(--muted));
+    }
+    .provider-status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .provider-status span {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .provider-status span.warn {
+      color: var(--vscode-inputValidation-warningForeground, var(--muted));
+    }
+    .provider-status span.skipped {
+      color: var(--muted);
+    }
+    .agent-reason {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .dropped-section {
+      margin-top: 24px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+    .dropped-toggle {
+      width: 100%;
+      text-align: left;
+      font-weight: 600;
+    }
+    .dropped-panel {
+      display: none;
+      margin-top: 12px;
+    }
+    .dropped-panel.open {
+      display: block;
+    }
+    .result.dropped {
+      opacity: 0.92;
+    }
     .empty {
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -252,6 +430,8 @@ function renderCitationSearchHtml({ nonce, claim, results, canImportToZotero = t
       <h1>Evidence Review</h1>
       <p class="claim">${safeClaim}</p>
       <div class="count">${resultCount} candidate${resultCount === 1 ? "" : "s"}</div>
+      ${providerStatusHtml}
+      ${allFilteredHint}
     </header>
     ${results.length ? results.map((result, index) => renderResult(result, index, { canImportToZotero })).join("") : `<section class="empty">
       <p>No citation candidates found.</p>
@@ -259,10 +439,19 @@ function renderCitationSearchHtml({ nonce, claim, results, canImportToZotero = t
         <button class="primary" data-action="registerClaim">Register Claim</button>
       </div>
     </section>`}
+    ${droppedSection}
   </main>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     let pending = false;
+    const droppedToggle = document.getElementById("dropped-toggle");
+    const droppedPanel = document.getElementById("dropped-panel");
+    if (droppedToggle && droppedPanel) {
+      droppedToggle.addEventListener("click", () => {
+        const open = droppedPanel.classList.toggle("open");
+        droppedToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+    }
     window.addEventListener("message", (event) => {
       if (event.data && event.data.type === "actionComplete") {
         pending = false;
@@ -284,8 +473,10 @@ function renderCitationSearchHtml({ nonce, claim, results, canImportToZotero = t
       }
       vscode.postMessage({
         type: "action",
+        sessionId: ${JSON.stringify(sessionId)},
         action: button.dataset.action,
-        index: Number(button.dataset.index)
+        index: Number(button.dataset.index),
+        section: button.dataset.section || "main"
       });
     });
   </script>

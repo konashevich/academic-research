@@ -1,0 +1,6 @@
+{
+  "id": "iade-default",
+  "version": "1.0.0",
+  "components": ["manuscript", "bibliography", "makefile", "instructions", "vscode", "csl"],
+  "profiles": ["lncs", "ledger", "frontiers", "report"]
+}

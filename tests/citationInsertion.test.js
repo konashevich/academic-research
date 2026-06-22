@@ -25,3 +25,15 @@ test("plans replacement for placeholder citation", () => {
   assert.equal(plan.mode, "replace-inside-selection");
   assert.deepEqual(plan.replacementSpan, { start: 16, end: 24 });
 });
+
+test("rejects ambiguous selections with multiple unresolved markers", () => {
+  const plan = planCitationInsertion("First [citation needed]. Second [@ref2].", "SMITH2020");
+
+  assert.equal(plan.mode, "ambiguous-unresolved-marker");
+});
+
+test("rejects invalid citekeys before building Pandoc syntax", () => {
+  const plan = planCitationInsertion("Important claim", "bad/key");
+
+  assert.equal(plan.mode, "invalid-citekey");
+});

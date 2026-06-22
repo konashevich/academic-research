@@ -1,0 +1,79 @@
+# =============================================================================
+# Academic Paper Configuration
+# =============================================================================
+# This is the single configuration file for your project. All build scripts,
+# verification tools, and agent instructions read from this file.
+
+project:
+  title: "Your Paper Title Here"
+  short_title: "Short Title"           # For page headers (if supported)
+  authors:
+    - name: "First Author"
+      affiliation: "University of Example"
+      email: "author@example.edu"
+  date: "2026"
+  language: "en-GB"                     # en-GB (British) or en-US (American)
+  manuscript: "paper.md"                # Main manuscript file
+  bibliography: "refs/bibliography.json" # CSL JSON bibliography
+
+# Active target — change this single line to switch journals
+target: lncs
+
+# =============================================================================
+# Target Profiles
+# =============================================================================
+# Each profile defines Pandoc parameters for a specific journal or output.
+# Run: ./build.sh              → uses the active target above
+# Run: ./build.sh -t ledger    → overrides with a specific target
+
+targets:
+  lncs:
+    description: "Springer Lecture Notes in Computer Science"
+    csl: "styles/lncs.csl"
+    documentclass: article
+    classoption: "twocolumn"
+    template: "templates/lncs/header.tex"
+    geometry: "margin=0.8in"
+    fontsize: "10pt"
+    extra_pandoc_args: []
+
+  ledger:
+    description: "Ledger Journal (University of Pittsburgh)"
+    csl: "styles/ledger.csl"
+    documentclass: article
+    classoption: ""
+    template: "templates/ledger/header.tex"
+    geometry: "a4paper,left=3.1cm,right=3.1cm,top=2.4cm,bottom=1.0cm,footskip=1.0cm,headsep=1.5cm,headheight=20pt"
+    fontsize: "11.5pt"
+    extra_pandoc_args: []
+
+  frontiers:
+    description: "Frontiers in Blockchain"
+    csl: "styles/frontiers.csl"
+    documentclass: article
+    classoption: ""
+    template: "templates/frontiers/header.tex"
+    geometry: "a4paper,margin=2.5cm"
+    fontsize: "11pt"
+    extra_pandoc_args: []
+
+  report:
+    description: "Custom report (ad-hoc design, two-column)"
+    csl: "styles/lncs.csl"
+    documentclass: article
+    classoption: "twocolumn"
+    template: "templates/report/header.tex"
+    geometry: "margin=0.8in"
+    fontsize: "10pt"
+    extra_pandoc_args: []
+
+# =============================================================================
+# MCP Infrastructure
+# =============================================================================
+# These are used by init-project.sh and referenced in .vscode/mcp.json.
+# Set ACADEMIC_MCP_HOST env var or edit directly.
+
+mcp:
+  host: "${ACADEMIC_MCP_HOST:-localhost}"
+  zotero_port: 9180
+  scholar_port: 3847

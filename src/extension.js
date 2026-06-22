@@ -5,14 +5,32 @@ const childProcess = require("child_process");
 const vscode = require("vscode");
 
 const { detectAcademicProject } = require("./projectDetector");
-const { loadBibliography, searchBibliography } = require("./bibliographyIndex");
+const {
+  addBatch,
+  getBatch,
+  hydrateSession,
+  removeBatch
+} = require("./citationSearchHistoryStore");
+const { CitationSearchHistoryViewProvider } = require("./citationSearchHistoryView");
+const { loadBibliography, searchBibliography, loadBibliographyFromContent } = require("./bibliographyIndex");
 const { findCitationIssues } = require("./citationDiagnostics");
 const { planCitationInsertion } = require("./citationInsertion");
-const { appendRegisterEntry } = require("./registerStore");
+const { buildCitationQuery, extractClaimTextFromLine } = require("./citationQuery");
+const { isValidCitekey, mergeCitationResults } = require("./citationResults");
+const { upsertRegisterEntry } = require("./registerStore");
 const { searchOpenAlex } = require("./openAlexClient");
 const { ZoteroMcpClient } = require("./zoteroMcpClient");
 const { ScholarMcpClient } = require("./scholarMcpClient");
 const { renderCitationSearchHtml } = require("./citationSearchPanel");
+const { buildProjectBibliographyContent, readExistingBibliography, writeBibliographySafely } = require("./safeBibliographySync");
+const { collectProjectCitekeys } = require("./projectCitekeys");
+const { registerCitationCodeActions } = require("./citationCodeActions");
+const { createInfrastructureManager, getInfrastructureManager } = require("./infrastructure/infrastructureManager");
+const { WritingHubPanel } = require("./writingHub/writingHubPanel");
+const { rankCitationResults, shouldRunAgentRanking } = require("./citationAgentRanker");
+const { registerScaffoldCommands } = require("./scaffold/scaffoldCommands");
+const { initializeBundledProfilesClone } = require("./profiles/profileRegistry");
+const { resolveWorkspaceRoot } = require("./workspaceRoot");
 
 let diagnostics;
 let statusBarItem;
@@ -20,7 +38,9 @@ let statusProvider;
 let outputChannel;
 let extensionContext;
 let citationPanel;
+let writingHubPanel;
 let currentCitationSession;
+let citationSearchHistoryViewProvider;
 
 class ProjectStatusProvider {
   constructor() {
@@ -45,6 +65,8 @@ class ProjectStatusProvider {
   getChildren() {
     if (!this.project || !this.project.found) {
       return [
+        hubTreeItem("Set up paper project", "project"),
+        treeItem("Infrastructure", getInfrastructureStatusLabel()),
         treeItem("Mode", "Generic Markdown"),
         treeItem("Status", this.project ? this.project.reason : "No workspace detected")
       ];
@@ -54,6 +76,8 @@ class ProjectStatusProvider {
     const activeTarget = config.activeTarget || {};
 
     return [
+      hubTreeItem(),
+      treeItem("Infrastructure", getInfrastructureStatusLabel()),
       treeItem("Mode", "Template-aware"),
       treeItem("Manuscript", path.relative(this.project.rootDir, this.project.paths.manuscript)),
       treeItem("Bibliography", path.relative(this.project.rootDir, this.project.paths.bibliography)),
@@ -65,29 +89,181 @@ class ProjectStatusProvider {
   }
 }
 
-function treeItem(label, description) {
+function treeItem(label, description, command) {
   const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
   item.description = description;
   item.tooltip = `${label}: ${description}`;
+  if (command) {
+    item.command = command;
+  }
   return item;
+}
+
+function hubTreeItem(descriptionOverride, step = "welcome") {
+  const infra = getInfrastructureManager();
+  const status = infra ? infra.getInfraStatusLabel() : "not initialized";
+  const description = descriptionOverride || (status === "setup needed" ? "Setup required" : status);
+  return treeItem("Writing Hub", description, {
+    command: "academicResearch.openWritingHub",
+    title: "Open Writing Hub",
+    arguments: [step]
+  });
+}
+
+function getInfrastructureStatusLabel() {
+  const infra = getInfrastructureManager();
+  if (!infra) {
+    return "not initialized";
+  }
+  return infra.getInfraStatusLabel();
+}
+
+function logInfrastructure(message) {
+  outputChannel.appendLine(message);
+}
+
+async function resolveMcpEndpoints(project) {
+  const infra = getInfrastructureManager();
+  if (!infra) {
+    return {
+      host: project?.config?.mcp?.host || "localhost",
+      zoteroPort: project?.config?.mcp?.zoteroPort || 9180,
+      scholarPort: project?.config?.mcp?.scholarPort || 3847
+    };
+  }
+
+  if (infra.isBundledMode()) {
+    const running = await infra.ensureRunning();
+    if (!running.ok) {
+      throw new Error(running.detail || "Bundled MCP services are not running.");
+    }
+  }
+
+  return infra.getEndpoints(project);
+}
+
+async function ensureInfrastructureReady(promptUser = true) {
+  const infra = getInfrastructureManager();
+  if (!infra || !infra.isBundledMode()) {
+    return true;
+  }
+
+  if (infra.isSetupComplete()) {
+    const running = await infra.ensureRunning();
+    return running.ok;
+  }
+
+  if (!promptUser) {
+    return false;
+  }
+
+  const open = "Open Writing Hub";
+  const picked = await vscode.window.showWarningMessage(
+    "Academic Research infrastructure is not set up yet.",
+    open
+  );
+  if (picked === open) {
+    await openWritingHub("infrastructure");
+  }
+  return false;
+}
+
+async function openWritingHub(step = "welcome") {
+  if (!writingHubPanel) {
+    return;
+  }
+  await writingHubPanel.open(step);
 }
 
 function activate(context) {
   extensionContext = context;
   diagnostics = vscode.languages.createDiagnosticCollection("academicResearch");
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 80);
-  statusBarItem.command = "academicResearch.showProjectStatus";
+  statusBarItem.command = "academicResearch.openWritingHub";
   statusBarItem.show();
   outputChannel = vscode.window.createOutputChannel("Academic Research");
+
+  createInfrastructureManager(context, {
+    logFn: logInfrastructure
+  });
+  context.subscriptions.push(
+    getInfrastructureManager().onDidChangeState(() => {
+      refreshStatus();
+      statusProvider._onDidChangeTreeData.fire();
+    })
+  );
+  writingHubPanel = new WritingHubPanel(context, getInfrastructureManager(), {
+    onOpenLogs: () => outputChannel.show(),
+    onOpenCitationTips: () => {
+      vscode.window.showInformationMessage(
+        "Select text in a Markdown manuscript and run Academic Research: Find Citation for Selection (Alt+Shift+C)."
+      );
+    },
+    onConnectAiChat: async () => {
+      const root = getWorkspaceRoot();
+      if (!root) {
+        throw new Error("Open a workspace folder before connecting MCP servers to AI chat.");
+      }
+      const written = await getInfrastructureManager().writeWorkspaceMcpConfig(root);
+      vscode.window.showInformationMessage(
+        `Updated MCP config for AI chat: ${written.join(", ")}. Reload MCP in Cursor/VS Code settings.`
+      );
+      return written;
+    },
+    onManageProfiles: () => vscode.commands.executeCommand("academicResearch.manageProfiles"),
+    onDeployComplete: (workspaceRoot, { infraReady, warnings = [] } = {}) => {
+      refreshStatus("deployed");
+      const warningNote = warnings.length ? ` ${warnings.join(" ")}` : "";
+      if (infraReady) {
+        vscode.window.showInformationMessage(
+          `Paper project deployed. Open paper.md to start writing.${warningNote}`
+        );
+      } else {
+        vscode.window.showInformationMessage(
+          `Paper project deployed. Connect Zotero in the Writing Hub when you need citation search or bibliography sync.${warningNote}`
+        );
+      }
+    },
+  });
+  context.subscriptions.push({ dispose: () => writingHubPanel.dispose() });
+  context.subscriptions.push(...registerScaffoldCommands(context, getInfrastructureManager()));
+
+  initializeBundledProfilesClone(context.globalStorageUri.fsPath, context.extensionPath);
+
+  citationSearchHistoryViewProvider = new CitationSearchHistoryViewProvider(context, {
+    getProjectRootDir: () => {
+      const project = getCurrentProject();
+      return project.found ? project.rootDir : "";
+    },
+    onOpenBatch: (batchId) => {
+      openCitationSearchFromHistory(batchId).catch((error) => {
+        logError("Could not open citation search from history", error);
+        vscode.window.showErrorMessage(`Could not open citation search: ${error.message}`);
+      });
+    },
+    onDeleteBatch: (batchId) => {
+      deleteCitationSearchFromHistory(batchId);
+    }
+  });
 
   statusProvider = new ProjectStatusProvider();
   context.subscriptions.push(
     diagnostics,
     statusBarItem,
     outputChannel,
+    vscode.window.registerWebviewViewProvider(
+      "academicResearch.citationSearchHistory",
+      citationSearchHistoryViewProvider,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    ),
     vscode.window.registerTreeDataProvider("academicResearch.projectStatus", statusProvider),
     vscode.commands.registerCommand("academicResearch.showProjectStatus", showProjectStatus),
+    vscode.commands.registerCommand("academicResearch.openWritingHub", (step) => {
+      const targetStep = typeof step === "string" ? step : "welcome";
+      return openWritingHub(targetStep);
+    }),
     vscode.commands.registerCommand("academicResearch.findCitationForSelection", findCitationForSelection),
+    vscode.commands.registerCommand("academicResearch.findCitationForClaim", findCitationForClaim),
     vscode.commands.registerCommand("academicResearch.verifyCitations", verifyCitations),
     vscode.commands.registerCommand("academicResearch.syncBibliography", syncBibliography),
     vscode.commands.registerCommand("academicResearch.buildDraftPdf", () => runMakeTarget("draft")),
@@ -109,20 +285,37 @@ function activate(context) {
     })
   );
 
+  registerCitationCodeActions(context);
+
   refreshStatus();
   refreshDiagnosticsForActiveDocument().catch((error) => logError("Initial diagnostics failed", error));
+
+  const config = vscode.workspace.getConfiguration("academicResearch");
+  const project = getCurrentProject();
+  const shouldAutoOpenHub =
+    !project.found &&
+    (config.get("autoOpenHubOnEmptyWorkspace", true) ||
+      (config.get("mcpMode", "bundled") === "bundled" && !config.get("setupComplete", false)));
+  if (shouldAutoOpenHub) {
+    setTimeout(() => {
+      openWritingHub(project.found ? "welcome" : "welcome").catch((error) => logError("Could not open Writing Hub", error));
+    }, 800);
+  }
 }
 
-function deactivate() {}
+function deactivate() {
+  const infra = getInfrastructureManager();
+  if (infra) {
+    infra.dispose();
+  }
+  if (writingHubPanel) {
+    writingHubPanel.dispose();
+    writingHubPanel = null;
+  }
+}
 
 function getWorkspaceRoot(resource) {
-  const folder = resource ? vscode.workspace.getWorkspaceFolder(resource) : null;
-  if (folder) {
-    return folder.uri.fsPath;
-  }
-
-  const firstFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
-  return firstFolder ? firstFolder.uri.fsPath : null;
+  return resolveWorkspaceRoot(resource);
 }
 
 function getCurrentProject() {
@@ -170,11 +363,13 @@ function refreshStatus(lastVerification) {
   if (project.found) {
     const target = project.config.target || "no target";
     const verifyState = lastVerification || statusProvider.lastVerification || "not run";
-    statusBarItem.text = `$(book) Academic: ${target} | ${count} refs | ${verifyState}`;
-    statusBarItem.tooltip = "Show Academic Research project status";
+    const infraState = getInfrastructureStatusLabel();
+    statusBarItem.text = `$(book) Academic: ${infraState} | ${target} | ${count} refs`;
+    statusBarItem.tooltip = "Open Academic Writing Hub";
   } else {
-    statusBarItem.text = "$(book) Academic: generic";
-    statusBarItem.tooltip = project.reason;
+    const infraState = getInfrastructureStatusLabel();
+    statusBarItem.text = `$(book) Academic: ${infraState}`;
+    statusBarItem.tooltip = "Open Academic Writing Hub";
   }
 
   statusProvider.refresh(project, count, lastVerification);
@@ -224,19 +419,6 @@ function getSelectedText() {
   return text.trim() ? text : null;
 }
 
-function resultDetail(result) {
-  const authors = Array.isArray(result.authors) ? result.authors.slice(0, 3).join(", ") : "";
-  const suffix = result.authors && result.authors.length > 3 ? " et al." : "";
-  return [authors ? `${authors}${suffix}` : "", result.year, result.venue].filter(Boolean).join(" | ");
-}
-
-function resultDescription(result) {
-  if (result.alreadyInBibliography) {
-    return `@${result.citekey} | ${result.source}`;
-  }
-  return result.doi ? `${result.source} | DOI ${result.doi}` : result.source;
-}
-
 function makeNonce() {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let text = "";
@@ -244,6 +426,20 @@ function makeNonce() {
     text += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return text;
+}
+
+function makeSessionId() {
+  return `citation-${Date.now()}-${makeNonce()}`;
+}
+
+function isProjectManuscriptDocument(project, document) {
+  return Boolean(
+    project &&
+    project.found &&
+    document &&
+    document.uri.scheme === "file" &&
+    path.resolve(document.uri.fsPath) === path.resolve(project.paths.manuscript)
+  );
 }
 
 function getSelectionSnapshot(editor) {
@@ -277,33 +473,52 @@ async function restoreSearchEditor(session) {
   return editor;
 }
 
-function normalizeResultKey(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/^https?:\/\/doi\.org\//, "")
-    .replace(/^doi:\s*/, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+function saveCitationSearchSession(session) {
+  if (!session?.project?.rootDir) {
+    return;
+  }
+  addBatch(session.project.rootDir, session);
+  citationSearchHistoryViewProvider?.refresh();
 }
 
-function dedupeCitationResults(results) {
-  const seen = new Set();
-  const deduped = [];
-
-  for (const result of results) {
-    const key = normalizeResultKey(result.doi)
-      || normalizeResultKey(result.url)
-      || [normalizeResultKey(result.title), normalizeResultKey(result.year)].filter(Boolean).join("|");
-    if (key && seen.has(key)) {
-      continue;
-    }
-    if (key) {
-      seen.add(key);
-    }
-    deduped.push(result);
+async function openCitationSearchFromHistory(batchId) {
+  const project = getCurrentProject();
+  if (!project.found) {
+    vscode.window.showWarningMessage("Open a paper project to restore saved citation searches.");
+    return;
   }
 
-  return deduped;
+  const record = getBatch(project.rootDir, batchId);
+  if (!record) {
+    vscode.window.showWarningMessage("That citation search is no longer saved.");
+    citationSearchHistoryViewProvider?.refresh();
+    return;
+  }
+
+  const session = hydrateSession(record, detectAcademicProject);
+  if (!session) {
+    vscode.window.showWarningMessage("Could not restore that citation search for the current project.");
+    return;
+  }
+
+  openCitationSearchPanel(session);
+}
+
+function deleteCitationSearchFromHistory(batchId) {
+  const project = getCurrentProject();
+  if (!project.found) {
+    return;
+  }
+
+  if (!removeBatch(project.rootDir, batchId)) {
+    return;
+  }
+
+  if (currentCitationSession?.id === batchId && citationPanel) {
+    citationPanel.dispose();
+  }
+
+  citationSearchHistoryViewProvider?.refresh();
 }
 
 function openCitationSearchPanel(session) {
@@ -343,9 +558,13 @@ function openCitationSearchPanel(session) {
   citationPanel.title = "Citation Search";
   citationPanel.webview.html = renderCitationSearchHtml({
     nonce: makeNonce(),
+    sessionId: session.id,
     claim: session.claim,
     results: session.results,
-    canImportToZotero: session.canImportToZotero
+    droppedResults: session.droppedResults || [],
+    expandDropped: session.expandDropped,
+    canImportToZotero: session.canImportToZotero,
+    providerStatuses: session.providerStatuses || []
   });
 }
 
@@ -354,17 +573,25 @@ async function handleCitationPanelMessage(message) {
     return;
   }
 
-  const project = currentCitationSession.project;
-  const claim = currentCitationSession.claim;
-  const selectedText = currentCitationSession.selectedText;
+  const session = currentCitationSession;
+  if (message.sessionId !== session.id) {
+    vscode.window.showWarningMessage("This citation search is stale. Run the search again.");
+    return;
+  }
+
+  const project = session.project;
+  const claim = session.claim;
+  const selectedText = session.selectedText;
 
   if (message.action === "registerClaim") {
-    const id = await addClaimToRegister(project, claim, currentCitationSession.queryText);
+    const id = await addClaimToRegister(project, claim, session.queryText);
     vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
     return;
   }
 
-  const result = currentCitationSession.results[message.index];
+  const result = message.section === "dropped"
+    ? session.droppedResults?.[message.index]
+    : session.results[message.index];
   if (!result) {
     return;
   }
@@ -381,31 +608,74 @@ async function handleCitationPanelMessage(message) {
   }
 
   if (message.action === "register") {
-    const id = await addClaimToRegister(project, claim, currentCitationSession.queryText, formatCandidateSource(result), "candidate-found");
+    const id = await addClaimToRegister(project, claim, session.queryText, formatCandidateSource(result), "candidate-found", result.citekey || "");
     vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
     return;
   }
 
-  const editor = await restoreSearchEditor(currentCitationSession);
-
-  if (message.action === "insert" && result.alreadyInBibliography && result.citekey) {
-    await insertCitationForSelection(editor, selectedText, result.citekey);
-    refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
+  if (message.section === "dropped" && message.action === "importInsert") {
     return;
   }
 
-  if (message.action === "syncInsert" && result.alreadyInZotero && result.citekey) {
-    const synced = await syncBibliography(project);
-    if (synced) {
-      await insertCitationForSelection(editor, selectedText, result.citekey);
+  const editor = await restoreSearchEditor(session);
+
+  if (message.action === "insert" && result.alreadyInBibliography && result.citekey) {
+    if (await insertCitationForSelection(editor, selectedText, result.citekey)) {
       refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
     }
     return;
   }
 
+  if (message.action === "syncInsert" && result.alreadyInZotero && result.citekey) {
+    const synced = await syncBibliography(project, { additionalKeys: [result.citekey] });
+    if (synced && ensureCitekeyInBibliography(project, result.citekey)) {
+      await insertCitationForSelection(editor, selectedText, result.citekey);
+      refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
+    } else if (synced) {
+      await addClaimToRegister(project, claim, session.queryText, formatCandidateSource(result), "candidate-found", result.citekey, { open: false });
+      vscode.window.showWarningMessage(`Synced bibliography, but @${result.citekey} was not found. Added the claim to the reference register.`);
+    }
+    return;
+  }
+
   if (message.action === "importInsert") {
+    if (result.canImport === false) {
+      const id = await addClaimToRegister(project, claim, session.queryText, formatCandidateSource(result), "candidate-found");
+      vscode.window.showWarningMessage(`Source metadata is incomplete, so it was registered as ${id} instead of imported.`);
+      return;
+    }
     await importExternalResult(project, editor, selectedText, result, claim);
   }
+}
+
+async function findCitationForClaim(diagnosticRange) {
+  const editor = vscode.window.activeTextEditor;
+  const range = reviveRange(diagnosticRange);
+  if (!editor || !range) {
+    vscode.window.showWarningMessage("Open the manuscript and place the cursor on the citation issue.");
+    return;
+  }
+
+  const selectedText = extractClaimTextFromLine(editor.document.lineAt(range.start.line).text);
+  if (!selectedText) {
+    vscode.window.showWarningMessage("Could not extract claim text from this line.");
+    return;
+  }
+
+  await runCitationSearch(editor, selectedText);
+}
+
+function reviveRange(value) {
+  if (value instanceof vscode.Range) {
+    return value;
+  }
+  if (value && value.start && value.end) {
+    return new vscode.Range(
+      new vscode.Position(value.start.line, value.start.character),
+      new vscode.Position(value.end.line, value.end.character)
+    );
+  }
+  return null;
 }
 
 async function findCitationForSelection() {
@@ -416,11 +686,24 @@ async function findCitationForSelection() {
     vscode.window.showWarningMessage("Select manuscript text first.");
     return;
   }
-  const queryText = selectedText.trim();
 
+  await runCitationSearch(editor, selectedText);
+}
+
+async function runCitationSearch(editor, selectedText) {
   const project = getCurrentProject();
   if (!project.found) {
     vscode.window.showWarningMessage("Template-aware citation search needs a workspace with paper.yaml.");
+    return;
+  }
+  if (!isProjectManuscriptDocument(project, editor.document)) {
+    vscode.window.showWarningMessage("Select text in the configured manuscript before searching for a citation.");
+    return;
+  }
+
+  const query = buildCitationQuery(selectedText);
+  if (!query.ok) {
+    vscode.window.showWarningMessage(query.message);
     return;
   }
 
@@ -432,34 +715,72 @@ async function findCitationForSelection() {
     return;
   }
 
-  const localResults = searchBibliography(bibliography, queryText, 8);
+  const localResults = searchBibliography(bibliography, query.queryText, 8);
   let results = [...localResults];
   const config = vscode.workspace.getConfiguration("academicResearch");
+  let zoteroAvailable = false;
+  let zoteroCanImport = false;
+  const providerStatuses = [];
+  let mcpEndpoints = null;
+
+  const wantsBundledMcp = config.get("mcpMode", "bundled") === "bundled"
+    && (config.get("enableZoteroMcp", true) || config.get("enableScholarMcp", true));
+  if (wantsBundledMcp) {
+    const ready = await ensureInfrastructureReady(true);
+    if (!ready) {
+      providerStatuses.push({ label: "Infrastructure", ok: false, detail: "setup required" });
+    }
+  }
+
+  try {
+    mcpEndpoints = await resolveMcpEndpoints(project);
+  } catch (error) {
+    logError("Could not resolve MCP endpoints", error);
+    providerStatuses.push({ label: "Infrastructure", ok: false, detail: error.message });
+  }
 
   if (config.get("enableZoteroMcp", true)) {
-    await addMcpSearchResults("Zotero MCP", results, async () => {
-      const zotero = new ZoteroMcpClient(project);
+    const zoteroStatus = await addMcpSearchResults("Zotero MCP", results, async () => {
+      const zotero = new ZoteroMcpClient(mcpEndpoints || project);
       try {
-        return await zotero.search(queryText, 6);
+        const zoteroResults = await zotero.search(query.queryText, 6);
+        zoteroCanImport = await zotero.hasTool("zotero_create_item").catch((error) => {
+          logError("Zotero MCP tool preflight failed", error);
+          return false;
+        });
+        return zoteroResults;
       } finally {
         await zotero.close();
       }
     });
+    zoteroAvailable = zoteroStatus.ok;
+    providerStatuses.push({
+      label: "Zotero MCP",
+      ok: zoteroStatus.ok,
+      detail: zoteroStatus.ok
+        ? (zoteroCanImport ? "ready" : "search only; import unavailable")
+        : zoteroStatus.detail
+    });
   }
 
   if (config.get("enableScholarMcp", true)) {
-    await addMcpSearchResults("Google Scholar MCP", results, async () => {
-      const scholar = new ScholarMcpClient(project);
+    const scholarStatus = await addMcpSearchResults("Google Scholar MCP", results, async () => {
+      const scholar = new ScholarMcpClient(mcpEndpoints || project);
       try {
-        return await scholar.search(queryText, 6);
+        return await scholar.search(query.queryText, 6);
       } finally {
         await scholar.close();
       }
     });
+    providerStatuses.push({
+      label: "Google Scholar MCP",
+      ok: scholarStatus.ok,
+      detail: scholarStatus.ok ? "ready" : scholarStatus.detail
+    });
   }
 
   if (config.get("enableOpenAlex", true)) {
-    await vscode.window.withProgress(
+    const openAlexStatus = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: "Searching academic sources",
@@ -467,33 +788,98 @@ async function findCitationForSelection() {
       },
       async () => {
         try {
-          const openAlexResults = await searchOpenAlex(queryText, {
+          const openAlexResults = await searchOpenAlex(query.queryText, {
             limit: 8,
             email: config.get("openAlexEmail", "")
           });
           results.push(...openAlexResults);
+          return { ok: true, detail: "ready" };
         } catch (error) {
           logError("OpenAlex search failed", error);
+          return { ok: false, detail: error.message };
         }
       }
     );
+    providerStatuses.push({
+      label: "OpenAlex",
+      ok: openAlexStatus.ok,
+      detail: openAlexStatus.detail
+    });
   }
 
-  results = dedupeCitationResults(results);
+  results = mergeCitationResults(results, bibliography);
 
-  openCitationSearchPanel({
+  const infra = getInfrastructureManager();
+  const cursorApiKey = await infra.getCursorApiKey();
+  const agentRankingEnabled = config.get("enableAgentRanking", true);
+  const rankingOptions = {
+    claim: query.claim,
+    queryText: query.queryText,
+    results,
+    projectRoot: project.rootDir,
+    extensionPath: extensionContext.extensionPath,
+    apiKey: cursorApiKey,
+    model: config.get("agentRankingModel", "composer-2.5"),
+    minScore: config.get("agentRankingMinScore", 40),
+    timeoutMs: config.get("agentRankingTimeoutMs", 60000),
+    enabled: agentRankingEnabled,
+    onLog: (message) => outputChannel.appendLine(`[Relevance agent] ${message}`)
+  };
+
+  const runRanking = () => rankCitationResults(rankingOptions);
+  const ranked = shouldRunAgentRanking({
+    enabled: agentRankingEnabled,
+    apiKey: cursorApiKey,
+    resultCount: results.length
+  })
+    ? await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Filtering results for relevance",
+        cancellable: false
+      },
+      async () => runRanking()
+    )
+    : await runRanking();
+
+  results = ranked.results;
+  const droppedResults = ranked.dropped;
+  providerStatuses.push({
+    label: "Relevance agent",
+    ok: ranked.ok,
+    skipped: ranked.status.skipped,
+    detail: ranked.status.detail
+  });
+
+  if (!ranked.ok && !ranked.status.skipped) {
+    logError("Relevance filtering failed", new Error(ranked.status.detail));
+    if (agentRankingEnabled && cursorApiKey) {
+      vscode.window.showWarningMessage(`Relevance filtering failed: ${ranked.status.detail}`);
+    }
+  }
+
+  const session = {
+    id: makeSessionId(),
+    createdAt: Date.now(),
     project,
-    claim: queryText,
-    queryText,
+    claim: query.claim,
+    queryText: query.queryText,
     selectedText,
     results,
+    droppedResults,
+    expandDropped: results.length === 0 && droppedResults.length > 0,
+    agentRanked: ranked.ok,
     selection: getSelectionSnapshot(editor),
-    canImportToZotero: config.get("enableZoteroMcp", true)
-  });
+    canImportToZotero: config.get("enableZoteroMcp", true) && zoteroAvailable && zoteroCanImport,
+    providerStatuses
+  };
+
+  saveCitationSearchSession(session);
+  openCitationSearchPanel(session);
 }
 
 async function addMcpSearchResults(label, results, search) {
-  await vscode.window.withProgress(
+  return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
       title: `Searching ${label}`,
@@ -502,71 +888,17 @@ async function addMcpSearchResults(label, results, search) {
     async () => {
       try {
         results.push(...await search());
+        return { ok: true, detail: "ready" };
       } catch (error) {
         logError(`${label} search failed`, error);
+        return { ok: false, detail: error.message };
       }
     }
   );
 }
 
-async function handleZoteroResult(project, editor, selectedText, result) {
-  const actions = ["Sync Bibliography and Insert", "Add to Reference Register"];
-  const picked = await vscode.window.showQuickPick(actions, {
-    title: "Zotero item selected",
-    placeHolder: `@${result.citekey} is in Zotero. Sync the local CSL JSON before inserting.`
-  });
-
-  if (picked === "Sync Bibliography and Insert") {
-    const synced = await syncBibliography(project);
-    if (!synced) {
-      return;
-    }
-    await insertCitationForSelection(editor, selectedText, result.citekey);
-    refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
-  } else if (picked === "Add to Reference Register") {
-    const candidate = [result.title, `@${result.citekey}`].filter(Boolean).join(" / ");
-    const id = await addClaimToRegister(project, selectedText, selectedText, candidate, "candidate-found");
-    vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
-  }
-}
-
 function formatCandidateSource(result) {
   return [result.title, result.doi || result.url].filter(Boolean).join(" / ");
-}
-
-async function handleExternalResult(project, editor, claim, result) {
-  const config = vscode.workspace.getConfiguration("academicResearch");
-  const actions = [];
-
-  if (config.get("enableZoteroMcp", true)) {
-    actions.push("Import to Zotero, Sync, and Insert");
-  }
-
-  actions.push("Add to Reference Register");
-
-  if (result.url) {
-    actions.push("Open Source URL");
-  }
-  if (result.doi) {
-    actions.push("Copy DOI");
-  }
-
-  const picked = await vscode.window.showQuickPick(actions, {
-    title: "External source selected",
-    placeHolder: "This source is not in the local bibliography yet."
-  });
-
-  if (picked === "Import to Zotero, Sync, and Insert") {
-    await importExternalResult(project, editor, claim, result);
-  } else if (picked === "Add to Reference Register") {
-    const id = await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "candidate-found");
-    vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
-  } else if (picked === "Open Source URL" && result.url) {
-    vscode.env.openExternal(vscode.Uri.parse(result.url));
-  } else if (picked === "Copy DOI" && result.doi) {
-    await vscode.env.clipboard.writeText(result.doi);
-    vscode.window.showInformationMessage("DOI copied.");
-  }
 }
 
 async function importExternalResult(project, editor, selectedText, result, claim = selectedText.trim()) {
@@ -580,7 +912,8 @@ async function importExternalResult(project, editor, selectedText, result, claim
         cancellable: false
       },
       async () => {
-        const zotero = new ZoteroMcpClient(project);
+        const endpoints = await resolveMcpEndpoints(project);
+        const zotero = new ZoteroMcpClient(endpoints);
         try {
           return await zotero.createItemFromResult(result, claim);
         } finally {
@@ -599,19 +932,29 @@ async function importExternalResult(project, editor, selectedText, result, claim
     return;
   }
 
-  const synced = await syncBibliography(project);
+  const synced = await syncBibliography(project, { additionalKeys: [created.key] });
   if (!synced) {
+    await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "imported", created.key, { open: false });
     vscode.window.showWarningMessage(`Imported @${created.key}, but bibliography sync failed. See the Academic Research output.`);
     return;
   }
 
-  await insertCitationForSelection(editor, selectedText, created.key);
-  await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "inserted", created.key, { open: false });
+  if (!ensureCitekeyInBibliography(project, created.key)) {
+    await addClaimToRegister(project, claim, claim, formatCandidateSource(result), "imported", created.key, { open: false });
+    vscode.window.showWarningMessage(`Imported @${created.key}, but it was not found in the synced bibliography. Added the claim to the reference register.`);
+    return;
+  }
+
+  const inserted = await insertCitationForSelection(editor, selectedText, created.key);
+  await addClaimToRegister(project, claim, claim, formatCandidateSource(result), inserted ? "inserted" : "imported", created.key, { open: false });
   refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Diagnostics refresh failed", error));
-  vscode.window.showInformationMessage(`Imported @${created.key}, synced bibliography, and inserted citation.`);
+  if (inserted) {
+    vscode.window.showInformationMessage(`Imported @${created.key}, synced bibliography, and inserted citation.`);
+  }
 }
 
 async function addSelectionToRegister() {
+  const editor = vscode.window.activeTextEditor;
   const selectedText = getSelectedText();
   if (!selectedText) {
     vscode.window.showWarningMessage("Select manuscript text first.");
@@ -623,13 +966,23 @@ async function addSelectionToRegister() {
     vscode.window.showWarningMessage("Reference register needs a workspace with paper.yaml.");
     return;
   }
+  if (!editor || !isProjectManuscriptDocument(project, editor.document)) {
+    vscode.window.showWarningMessage("Select text in the configured manuscript before adding it to the reference register.");
+    return;
+  }
 
-  const id = await addClaimToRegister(project, selectedText, selectedText);
+  const query = buildCitationQuery(selectedText);
+  if (!query.ok) {
+    vscode.window.showWarningMessage(query.message);
+    return;
+  }
+
+  const id = await addClaimToRegister(project, query.claim, query.queryText);
   vscode.window.showInformationMessage(`Added ${id} to refs/reference-register.md.`);
 }
 
 async function addClaimToRegister(project, claim, query, candidateSource = "", status = "needed", zoteroKey = "", options = {}) {
-  const id = appendRegisterEntry(project.paths.referenceRegister, {
+  const id = upsertRegisterEntry(project.paths.referenceRegister, {
     claim,
     query,
     candidateSource,
@@ -725,6 +1078,19 @@ async function refreshDiagnosticsForDocument(document, project = getCurrentProje
   refreshStatus(vscodeDiagnostics.length ? `${vscodeDiagnostics.length} issue${vscodeDiagnostics.length === 1 ? "" : "s"}` : "ok");
 }
 
+function ensureCitekeyInBibliography(project, citekey) {
+  if (!isValidCitekey(citekey)) {
+    return false;
+  }
+
+  try {
+    return loadProjectBibliography(project).some((item) => item.id === citekey);
+  } catch (error) {
+    logError("Could not verify citekey after bibliography sync", error);
+    return false;
+  }
+}
+
 function runMakeTarget(target, args = []) {
   const project = getCurrentProject();
 
@@ -747,16 +1113,40 @@ function runMakeTarget(target, args = []) {
   terminal.sendText(command, true);
 }
 
-async function syncBibliography(project = getCurrentProject()) {
+function getManuscriptTexts(project) {
+  const editor = vscode.window.activeTextEditor;
+  if (editor && isProjectManuscriptDocument(project, editor.document)) {
+    return [editor.document.getText()];
+  }
+  return [];
+}
+
+async function syncBibliography(project = getCurrentProject(), options = {}) {
   if (!project.found) {
     vscode.window.showWarningMessage("Bibliography sync needs a workspace with paper.yaml.");
     return false;
   }
 
   const config = vscode.workspace.getConfiguration("academicResearch");
+  if (config.get("mcpMode", "bundled") === "bundled" && config.get("enableZoteroMcp", true)) {
+    const ready = await ensureInfrastructureReady(true);
+    if (!ready) {
+      return false;
+    }
+  }
+
   if (!config.get("enableZoteroMcp", true)) {
-    runMakeTarget("sync");
-    return true;
+    if (!project.makeTargets.includes("sync")) {
+      vscode.window.showWarningMessage("Make target 'sync' was not found in this project.");
+      return false;
+    }
+    const result = await runMakeTargetCaptured(project, "sync");
+    const ok = result.exitCode === 0;
+    refreshStatus(ok ? "synced" : "sync failed");
+    if (!ok) {
+      vscode.window.showWarningMessage("Bibliography sync failed. See the Academic Research output.");
+    }
+    return ok;
   }
 
   return vscode.window.withProgress(
@@ -766,16 +1156,97 @@ async function syncBibliography(project = getCurrentProject()) {
       cancellable: false
     },
     async () => {
-      const zotero = new ZoteroMcpClient(project);
+      const endpoints = await resolveMcpEndpoints(project);
+      const zotero = new ZoteroMcpClient(endpoints);
       try {
-        const exportResult = await zotero.exportBibliographyContent();
-        await vscode.workspace.fs.writeFile(
-          vscode.Uri.file(project.paths.bibliography),
-          Buffer.from(`${exportResult.content}\n`, "utf8")
-        );
-        refreshStatus("synced");
+        const citekeys = collectProjectCitekeys(project, {
+          additionalKeys: options.additionalKeys,
+          manuscriptTexts: getManuscriptTexts(project)
+        });
+
+        if (!citekeys.length) {
+          const existing = readExistingBibliography(project.paths.bibliography);
+          if (existing.items.length > 0) {
+            const clear = "Clear Bibliography";
+            const picked = await vscode.window.showWarningMessage(
+              `No citekeys found in the manuscript. This will replace ${existing.items.length} bibliography entries with an empty file.`,
+              { modal: true },
+              clear
+            );
+            if (picked !== clear) {
+              return false;
+            }
+          }
+        }
+
+        const exportResult = await zotero.exportBibliographyForCitekeys(citekeys);
+        for (const warning of exportResult.warnings || []) {
+          outputChannel.appendLine(warning);
+        }
+
+        const existingBibliography = readExistingBibliography(project.paths.bibliography);
+        const freshItems = loadBibliographyFromContent(exportResult.content);
+        const zoteroUnresolved = exportResult.unresolved || [];
+        let contentToWrite = exportResult.content;
+        let mergeInfo = null;
+
+        if (zoteroUnresolved.length > 0 && citekeys.length > 0) {
+          mergeInfo = buildProjectBibliographyContent(citekeys, freshItems, existingBibliography.items);
+          contentToWrite = mergeInfo.content;
+          for (const key of mergeInfo.preservedFromExisting) {
+            outputChannel.appendLine(`Kept existing bibliography entry for unresolved @${key}.`);
+          }
+        }
+
+        let writeResult;
+        try {
+          writeResult = writeBibliographySafely(project.paths.bibliography, contentToWrite, {
+            projectScoped: true,
+            requestedKeyCount: citekeys.length
+          });
+        } catch (error) {
+          if (!/^Refusing /.test(error.message)) {
+            throw error;
+          }
+          const replace = "Replace Anyway";
+          const picked = await vscode.window.showWarningMessage(error.message, { modal: true }, replace);
+          if (picked !== replace) {
+            logError("Zotero MCP bibliography sync refused", error);
+            return false;
+          }
+          writeResult = writeBibliographySafely(project.paths.bibliography, contentToWrite, {
+            allowDangerousReplace: true,
+            projectScoped: true,
+            requestedKeyCount: citekeys.length
+          });
+        }
+
         await refreshDiagnosticsForProject(getCurrentProject());
-        vscode.window.showInformationMessage(`Synced ${exportResult.count} Zotero references.`);
+        const syncedCount = writeResult.nextCount || exportResult.count;
+        const stillMissing = mergeInfo ? mergeInfo.unresolved : zoteroUnresolved;
+        const syncComplete = stillMissing.length === 0;
+
+        if (!citekeys.length) {
+          refreshStatus("synced");
+          vscode.window.showInformationMessage("No project citekeys found in the manuscript; bibliography is now empty.");
+          return true;
+        }
+
+        if (!syncComplete) {
+          refreshStatus("sync incomplete");
+          const preserved = mergeInfo?.preservedFromExisting || [];
+          const refreshed = mergeInfo?.refreshedCount ?? (syncedCount - preserved.length);
+          let message = `Bibliography partially updated: refreshed ${refreshed} of ${citekeys.length} project citekey(s).`;
+          if (preserved.length) {
+            message += ` Kept existing entries for @${preserved.join(", @")}.`;
+          }
+          message += ` Still missing from Zotero: @${stillMissing.join(", @")}.`;
+          vscode.window.showWarningMessage(message);
+          return false;
+        }
+
+        refreshStatus("synced");
+        vscode.window.showInformationMessage(`Synced ${syncedCount} project citekey(s) from Zotero.`);
         return true;
       } catch (error) {
         logError("Zotero MCP bibliography sync failed", error);
@@ -822,6 +1293,16 @@ function runMakeTargetCaptured(project, target, args = []) {
 async function insertCitationForSelection(editor, selectedText, citekey) {
   const plan = planCitationInsertion(selectedText, citekey);
 
+  if (plan.mode === "invalid-citekey") {
+    vscode.window.showErrorMessage(plan.reason);
+    return false;
+  }
+
+  if (plan.mode === "ambiguous-unresolved-marker") {
+    vscode.window.showWarningMessage(plan.reason);
+    return false;
+  }
+
   await editor.edit((editBuilder) => {
     if (plan.mode === "replace-inside-selection") {
       const start = editor.document.offsetAt(editor.selection.start) + plan.replacementSpan.start;
@@ -835,6 +1316,7 @@ async function insertCitationForSelection(editor, selectedText, citekey) {
 
     editBuilder.insert(editor.selection.end, `${plan.leadingText}${plan.citation}${plan.trailingText}`);
   });
+  return true;
 }
 
 async function switchTarget() {

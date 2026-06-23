@@ -300,18 +300,6 @@ function activate(context) {
 
   refreshStatus();
   refreshDiagnosticsForActiveDocument().catch((error) => logError("Initial diagnostics failed", error));
-
-  const config = vscode.workspace.getConfiguration("academicResearch");
-  const project = getCurrentProject();
-  const shouldAutoOpenHub =
-    !project.found &&
-    (config.get("autoOpenHubOnEmptyWorkspace", true) ||
-      (config.get("mcpMode", "bundled") === "bundled" && !config.get("setupComplete", false)));
-  if (shouldAutoOpenHub) {
-    setTimeout(() => {
-      openWritingHub(project.found ? "welcome" : "welcome").catch((error) => logError("Could not open Writing Hub", error));
-    }, 800);
-  }
 }
 
 function deactivate() {

@@ -245,6 +245,12 @@
           "type": "number",
           "default": 60000,
           "description": "Timeout in milliseconds for the relevance-ranking agent."
+        },
+        "academicResearch.citationSearchHistoryMax": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Maximum number of saved citation searches kept per paper project."
         }
       }
     }

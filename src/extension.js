@@ -8,6 +8,7 @@ const { detectAcademicProject } = require("./projectDetector");
 const {
   addBatch,
   getBatch,
+  hasHistoryDir,
   hydrateSession,
   removeBatch
 } = require("./citationSearchHistoryStore");
@@ -21,7 +22,7 @@ const { upsertRegisterEntry } = require("./registerStore");
 const { searchOpenAlex } = require("./openAlexClient");
 const { ZoteroMcpClient } = require("./zoteroMcpClient");
 const { ScholarMcpClient } = require("./scholarMcpClient");
-const { renderCitationSearchHtml } = require("./citationSearchPanel");
+const { renderCitationSearchHtml, truncateText } = require("./citationSearchPanel");
 const { buildProjectBibliographyContent, readExistingBibliography, writeBibliographySafely } = require("./safeBibliographySync");
 const { collectProjectCitekeys } = require("./projectCitekeys");
 const { registerCitationCodeActions } = require("./citationCodeActions");
@@ -231,10 +232,7 @@ function activate(context) {
   initializeBundledProfilesClone(context.globalStorageUri.fsPath, context.extensionPath);
 
   citationSearchHistoryViewProvider = new CitationSearchHistoryViewProvider(context, {
-    getProjectRootDir: () => {
-      const project = getCurrentProject();
-      return project.found ? project.rootDir : "";
-    },
+    getProjectRootDir: () => resolveCitationHistoryRoot(),
     onOpenBatch: (batchId) => {
       openCitationSearchFromHistory(batchId).catch((error) => {
         logError("Could not open citation search from history", error);
@@ -242,9 +240,18 @@ function activate(context) {
       });
     },
     onDeleteBatch: (batchId) => {
-      deleteCitationSearchFromHistory(batchId);
+      deleteCitationSearchFromHistory(batchId).catch((error) => {
+        logError("Could not delete citation search from history", error);
+        vscode.window.showErrorMessage(`Could not delete citation search: ${error.message}`);
+      });
     }
   });
+
+  const citationHistoryWatcher = vscode.workspace.createFileSystemWatcher("**/refs/citation-searches/**/*.json");
+  citationHistoryWatcher.onDidCreate(() => refreshCitationSearchHistory());
+  citationHistoryWatcher.onDidChange(() => refreshCitationSearchHistory());
+  citationHistoryWatcher.onDidDelete(() => refreshCitationSearchHistory());
+  context.subscriptions.push(citationHistoryWatcher);
 
   statusProvider = new ProjectStatusProvider();
   context.subscriptions.push(
@@ -276,9 +283,13 @@ function activate(context) {
         refreshDiagnosticsForDocument(document).catch((error) => logError("Auto verification failed", error));
       }
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => refreshStatus()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      refreshStatus();
+      refreshCitationSearchHistory();
+    }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       refreshStatus();
+      refreshCitationSearchHistory();
       if (editor) {
         refreshDiagnosticsForDocument(editor.document).catch((error) => logError("Active editor diagnostics failed", error));
       }
@@ -473,44 +484,105 @@ async function restoreSearchEditor(session) {
   return editor;
 }
 
+function refreshCitationSearchHistory() {
+  citationSearchHistoryViewProvider?.refresh();
+}
+
+function resolveCitationHistoryRoot() {
+  const project = getCurrentProject();
+  if (project.found) {
+    return project.rootDir;
+  }
+
+  const root = getWorkspaceRoot();
+  return root && hasHistoryDir(root) ? root : "";
+}
+
+async function resolveCanImportToZotero(project) {
+  const config = vscode.workspace.getConfiguration("academicResearch");
+  if (!config.get("enableZoteroMcp", true) || !project?.found) {
+    return false;
+  }
+
+  try {
+    const endpoints = await resolveMcpEndpoints(project);
+    const zotero = new ZoteroMcpClient(endpoints);
+    try {
+      return await zotero.hasTool("zotero_create_item");
+    } finally {
+      await zotero.close();
+    }
+  } catch (error) {
+    logError("Zotero import preflight failed", error);
+    return false;
+  }
+}
+
 function saveCitationSearchSession(session) {
   if (!session?.project?.rootDir) {
     return;
   }
-  addBatch(session.project.rootDir, session);
-  citationSearchHistoryViewProvider?.refresh();
+
+  try {
+    const maxBatches = vscode.workspace.getConfiguration("academicResearch").get("citationSearchHistoryMax", 50);
+    addBatch(session.project.rootDir, session, { maxBatches });
+    refreshCitationSearchHistory();
+  } catch (error) {
+    logError("Could not save citation search history", error);
+    vscode.window.showWarningMessage(`Citation search completed, but could not save history: ${error.message}`);
+  }
 }
 
 async function openCitationSearchFromHistory(batchId) {
-  const project = getCurrentProject();
-  if (!project.found) {
-    vscode.window.showWarningMessage("Open a paper project to restore saved citation searches.");
+  const projectRootDir = resolveCitationHistoryRoot();
+  if (!projectRootDir) {
+    vscode.window.showWarningMessage("Open a workspace with saved citation searches to restore them.");
     return;
   }
 
-  const record = getBatch(project.rootDir, batchId);
+  const record = getBatch(projectRootDir, batchId);
   if (!record) {
     vscode.window.showWarningMessage("That citation search is no longer saved.");
-    citationSearchHistoryViewProvider?.refresh();
+    refreshCitationSearchHistory();
     return;
   }
 
   const session = hydrateSession(record, detectAcademicProject);
   if (!session) {
-    vscode.window.showWarningMessage("Could not restore that citation search for the current project.");
+    vscode.window.showWarningMessage("That citation search file is invalid.");
     return;
+  }
+
+  if (session.projectReady) {
+    session.canImportToZotero = await resolveCanImportToZotero(session.project);
   }
 
   openCitationSearchPanel(session);
 }
 
-function deleteCitationSearchFromHistory(batchId) {
-  const project = getCurrentProject();
-  if (!project.found) {
+async function deleteCitationSearchFromHistory(batchId) {
+  const projectRootDir = resolveCitationHistoryRoot();
+  if (!projectRootDir) {
     return;
   }
 
-  if (!removeBatch(project.rootDir, batchId)) {
+  const record = getBatch(projectRootDir, batchId);
+  if (!record) {
+    refreshCitationSearchHistory();
+    return;
+  }
+
+  const label = truncateText(record.claim || record.queryText || "this search", 80);
+  const confirm = await vscode.window.showWarningMessage(
+    `Delete saved citation search "${label}"?`,
+    { modal: true },
+    "Delete"
+  );
+  if (confirm !== "Delete") {
+    return;
+  }
+
+  if (!removeBatch(projectRootDir, batchId)) {
     return;
   }
 
@@ -518,7 +590,7 @@ function deleteCitationSearchFromHistory(batchId) {
     citationPanel.dispose();
   }
 
-  citationSearchHistoryViewProvider?.refresh();
+  refreshCitationSearchHistory();
 }
 
 function openCitationSearchPanel(session) {
@@ -556,6 +628,7 @@ function openCitationSearchPanel(session) {
   }
 
   citationPanel.title = "Citation Search";
+  const readOnly = !session.projectReady;
   citationPanel.webview.html = renderCitationSearchHtml({
     nonce: makeNonce(),
     sessionId: session.id,
@@ -564,7 +637,11 @@ function openCitationSearchPanel(session) {
     droppedResults: session.droppedResults || [],
     expandDropped: session.expandDropped,
     canImportToZotero: session.canImportToZotero,
-    providerStatuses: session.providerStatuses || []
+    providerStatuses: session.providerStatuses || [],
+    readOnly,
+    readOnlyReason: readOnly
+      ? "Saved snapshot only. Restore paper.yaml to insert citations or register claims."
+      : ""
   });
 }
 
@@ -576,6 +653,12 @@ async function handleCitationPanelMessage(message) {
   const session = currentCitationSession;
   if (message.sessionId !== session.id) {
     vscode.window.showWarningMessage("This citation search is stale. Run the search again.");
+    return;
+  }
+
+  const projectBoundActions = new Set(["registerClaim", "register", "insert", "syncInsert", "importInsert"]);
+  if (!session.projectReady && projectBoundActions.has(message.action)) {
+    vscode.window.showWarningMessage("This saved search is view-only until the paper project is available again.");
     return;
   }
 

@@ -4,10 +4,18 @@ const fs = require("fs");
 const path = require("path");
 
 const HISTORY_DIR = path.join("refs", "citation-searches");
-const MAX_BATCHES = 50;
+const DEFAULT_MAX_BATCHES = 50;
 
 function getHistoryDir(projectRootDir) {
   return path.join(projectRootDir, HISTORY_DIR);
+}
+
+function hasHistoryDir(projectRootDir) {
+  return Boolean(projectRootDir) && fs.existsSync(getHistoryDir(projectRootDir));
+}
+
+function normalizeRoot(projectRootDir) {
+  return path.resolve(projectRootDir || "");
 }
 
 function getBatchPath(projectRootDir, batchId) {
@@ -34,7 +42,7 @@ function readBatchFile(filePath) {
   }
 }
 
-function readAllBatches(projectRootDir) {
+function readAllBatchEntries(projectRootDir) {
   if (!projectRootDir) {
     return [];
   }
@@ -46,8 +54,28 @@ function readAllBatches(projectRootDir) {
 
   return fs.readdirSync(historyDir)
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readBatchFile(path.join(historyDir, name)))
+    .map((name) => {
+      const filePath = path.join(historyDir, name);
+      const record = readBatchFile(filePath);
+      return record ? { record, filePath } : null;
+    })
     .filter(Boolean);
+}
+
+function findBatchEntry(projectRootDir, batchId) {
+  if (!projectRootDir || !batchId) {
+    return null;
+  }
+
+  const expectedPath = getBatchPath(projectRootDir, batchId);
+  if (expectedPath && fs.existsSync(expectedPath)) {
+    const record = readBatchFile(expectedPath);
+    if (record?.id === batchId) {
+      return { record, filePath: expectedPath };
+    }
+  }
+
+  return readAllBatchEntries(projectRootDir).find((entry) => entry.record.id === batchId) || null;
 }
 
 function serializeSession(session) {
@@ -57,7 +85,7 @@ function serializeSession(session) {
 
   return {
     id: session.id,
-    createdAt: session.createdAt || Date.now(),
+    createdAt: session.createdAt ?? Date.now(),
     projectRootDir: session.project.rootDir,
     claim: session.claim,
     queryText: session.queryText,
@@ -77,15 +105,20 @@ function hydrateSession(record, detectProject) {
     return null;
   }
 
-  const project = detectProject(record.projectRootDir);
-  if (!project?.found) {
-    return null;
-  }
+  const detected = detectProject(record.projectRootDir);
+  const projectReady = Boolean(detected?.found);
 
   return {
     id: record.id,
     createdAt: record.createdAt,
-    project,
+    project: projectReady
+      ? detected
+      : {
+        found: false,
+        rootDir: record.projectRootDir,
+        reason: detected?.reason || "paper.yaml not found"
+      },
+    projectReady,
     claim: record.claim,
     queryText: record.queryText,
     selectedText: record.selectedText,
@@ -94,7 +127,7 @@ function hydrateSession(record, detectProject) {
     expandDropped: Boolean(record.expandDropped),
     agentRanked: Boolean(record.agentRanked),
     selection: record.selection,
-    canImportToZotero: Boolean(record.canImportToZotero),
+    canImportToZotero: false,
     providerStatuses: record.providerStatuses || []
   };
 }
@@ -104,25 +137,35 @@ function listBatches(projectRootDir) {
     return [];
   }
 
-  return readAllBatches(projectRootDir)
-    .filter((batch) => batch.projectRootDir === projectRootDir)
+  const normalizedRoot = normalizeRoot(projectRootDir);
+  return readAllBatchEntries(projectRootDir)
+    .map((entry) => entry.record)
+    .filter((batch) => normalizeRoot(batch.projectRootDir) === normalizedRoot)
     .sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
 }
 
-function trimOldBatches(projectRootDir) {
-  const batches = readAllBatches(projectRootDir)
-    .sort((left, right) => (left.createdAt || 0) - (right.createdAt || 0));
+function resolveMaxBatches(options = {}) {
+  const value = Number(options.maxBatches);
+  if (!Number.isFinite(value) || value < 1) {
+    return DEFAULT_MAX_BATCHES;
+  }
+  return Math.floor(value);
+}
 
-  while (batches.length > MAX_BATCHES) {
-    const oldest = batches.shift();
-    const batchPath = getBatchPath(projectRootDir, oldest.id);
-    if (batchPath && fs.existsSync(batchPath)) {
-      fs.unlinkSync(batchPath);
+function trimOldBatches(projectRootDir, maxBatches = DEFAULT_MAX_BATCHES) {
+  const limit = resolveMaxBatches({ maxBatches });
+  const entries = readAllBatchEntries(projectRootDir)
+    .sort((left, right) => (left.record.createdAt || 0) - (right.record.createdAt || 0));
+
+  while (entries.length > limit) {
+    const oldest = entries.shift();
+    if (oldest?.filePath && fs.existsSync(oldest.filePath)) {
+      fs.unlinkSync(oldest.filePath);
     }
   }
 }
 
-function addBatch(projectRootDir, session) {
+function addBatch(projectRootDir, session, options = {}) {
   const record = serializeSession(session);
   if (!record || !projectRootDir) {
     return null;
@@ -131,7 +174,7 @@ function addBatch(projectRootDir, session) {
   ensureHistoryDir(projectRootDir);
   const batchPath = getBatchPath(projectRootDir, record.id);
   fs.writeFileSync(batchPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-  trimOldBatches(projectRootDir);
+  trimOldBatches(projectRootDir, options.maxBatches);
   return record;
 }
 
@@ -140,12 +183,12 @@ function removeBatch(projectRootDir, batchId) {
     return false;
   }
 
-  const batchPath = getBatchPath(projectRootDir, batchId);
-  if (!batchPath || !fs.existsSync(batchPath)) {
+  const entry = findBatchEntry(projectRootDir, batchId);
+  if (!entry?.filePath || !fs.existsSync(entry.filePath)) {
     return false;
   }
 
-  fs.unlinkSync(batchPath);
+  fs.unlinkSync(entry.filePath);
   return true;
 }
 
@@ -154,22 +197,19 @@ function getBatch(projectRootDir, batchId) {
     return null;
   }
 
-  const batchPath = getBatchPath(projectRootDir, batchId);
-  if (!batchPath || !fs.existsSync(batchPath)) {
-    return null;
-  }
-
-  return readBatchFile(batchPath);
+  return findBatchEntry(projectRootDir, batchId)?.record || null;
 }
 
 module.exports = {
   HISTORY_DIR,
-  MAX_BATCHES,
+  DEFAULT_MAX_BATCHES,
   getHistoryDir,
+  hasHistoryDir,
   serializeSession,
   hydrateSession,
   listBatches,
   addBatch,
   removeBatch,
-  getBatch
+  getBatch,
+  findBatchEntry
 };

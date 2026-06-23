@@ -106,7 +106,48 @@ test("hydrateSession rebuilds project-aware session", () => {
 
   assert.equal(session.id, "citation-1");
   assert.equal(session.project.rootDir, rootDir);
+  assert.equal(session.projectReady, true);
   assert.equal(session.results.length, 1);
+});
+
+test("hydrateSession returns view-only session when paper project is unavailable", () => {
+  const rootDir = "/tmp/paper";
+  const record = serializeSession(makeSampleSession(rootDir));
+  const session = hydrateSession(record, () => ({
+    found: false,
+    rootDir,
+    reason: "paper.yaml not found"
+  }));
+
+  assert.equal(session.projectReady, false);
+  assert.equal(session.project.reason, "paper.yaml not found");
+  assert.equal(session.results.length, 1);
+});
+
+test("getBatch and removeBatch resolve batches by JSON id even when file is renamed", () => {
+  const rootDir = createTempProjectRoot();
+  addBatch(rootDir, makeSampleSession(rootDir));
+  const renamedPath = path.join(getHistoryDir(rootDir), "renamed-batch.json");
+  fs.renameSync(path.join(getHistoryDir(rootDir), "citation-1.json"), renamedPath);
+
+  assert.equal(getBatch(rootDir, "citation-1")?.claim, "Learning outcomes improved");
+  assert.equal(removeBatch(rootDir, "citation-1"), true);
+  assert.equal(getBatch(rootDir, "citation-1"), null);
+});
+
+test("addBatch trims to configured max batches", () => {
+  const rootDir = createTempProjectRoot();
+  for (let index = 0; index < 4; index += 1) {
+    addBatch(rootDir, makeSampleSession(rootDir, {
+      id: `citation-${index}`,
+      createdAt: index * 1000
+    }), { maxBatches: 3 });
+  }
+
+  const batches = listBatches(rootDir);
+  assert.equal(batches.length, 3);
+  assert.equal(batches[0].id, "citation-3");
+  assert.equal(batches[2].id, "citation-1");
 });
 
 test("removeBatch deletes a saved search file", () => {

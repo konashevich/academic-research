@@ -63,6 +63,13 @@ function renderActionButton(label, action, index, options = {}) {
   </div>`;
 }
 
+function renderReadOnlyActions(result, index, section) {
+  return [
+    result.url ? renderActionButton("Open", "open", index, { section }) : "",
+    result.doi ? renderActionButton("Copy DOI", "copyDoi", index, { section }) : ""
+  ].filter(Boolean).join("");
+}
+
 function renderResult(result, index, options) {
   const meta = [
     formatAuthors(result.authors),
@@ -84,6 +91,7 @@ function renderResult(result, index, options) {
   const agentReason = result.agentReason ? `<p class="agent-reason">${escapeHtml(result.agentReason)}</p>` : "";
   const dropped = Boolean(options.dropped);
   const section = options.section || "main";
+  const readOnly = Boolean(options.readOnly);
   const canImport = options.canImportToZotero && result.canImport !== false && !dropped;
   const primaryAction = dropped
     ? (result.alreadyInBibliography && result.citekey
@@ -122,10 +130,12 @@ function renderResult(result, index, options) {
       </dl>
       ${qualityWarning}
       <div class="actions">
-        ${primaryAction}
+        ${readOnly
+    ? renderReadOnlyActions(result, index, section)
+    : `${primaryAction}
         ${dropped || primaryAction.includes('data-action="register"') ? "" : renderActionButton("Register", "register", index, { section })}
         ${result.url ? renderActionButton("Open", "open", index, { section }) : ""}
-        ${result.doi ? renderActionButton("Copy DOI", "copyDoi", index, { section }) : ""}
+        ${result.doi ? renderActionButton("Copy DOI", "copyDoi", index, { section }) : ""}`}
       </div>
     </article>
   `;
@@ -139,13 +149,18 @@ function renderCitationSearchHtml({
   droppedResults = [],
   expandDropped = false,
   canImportToZotero = true,
-  providerStatuses = []
+  providerStatuses = [],
+  readOnly = false,
+  readOnlyReason = ""
 }) {
   const safeClaim = escapeHtml(truncateText(claim, 900));
   const resultCount = results.length;
   const droppedCount = droppedResults.length;
   const providerStatusHtml = providerStatuses.length
     ? `<div class="provider-status">${providerStatuses.map(renderProviderStatus).join("")}</div>`
+    : "";
+  const readOnlyBanner = readOnly && readOnlyReason
+    ? `<p class="warning">${escapeHtml(readOnlyReason)}</p>`
     : "";
   const allFilteredHint = resultCount === 0 && droppedCount > 0
     ? `<p class="warning">All candidates were filtered as low relevance. Review hidden results below or narrow your claim.</p>`
@@ -159,7 +174,8 @@ function renderCitationSearchHtml({
         ${droppedResults.map((result, index) => renderResult(result, index, {
           canImportToZotero,
           dropped: true,
-          section: "dropped"
+          section: "dropped",
+          readOnly
         })).join("")}
       </div>
     </section>`
@@ -431,13 +447,14 @@ function renderCitationSearchHtml({
       <p class="claim">${safeClaim}</p>
       <div class="count">${resultCount} candidate${resultCount === 1 ? "" : "s"}</div>
       ${providerStatusHtml}
+      ${readOnlyBanner}
       ${allFilteredHint}
     </header>
-    ${results.length ? results.map((result, index) => renderResult(result, index, { canImportToZotero })).join("") : `<section class="empty">
+    ${results.length ? results.map((result, index) => renderResult(result, index, { canImportToZotero, readOnly })).join("") : `<section class="empty">
       <p>No citation candidates found.</p>
-      <div class="actions">
+      ${readOnly ? "" : `<div class="actions">
         <button class="primary" data-action="registerClaim">Register Claim</button>
-      </div>
+      </div>`}
     </section>`}
     ${droppedSection}
   </main>

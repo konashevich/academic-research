@@ -3,3 +3,5 @@ node_modules/
 .vscode-test/
 coverage/
 .specstory/
+secrets/*.env
+!secrets/*.env.example

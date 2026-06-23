@@ -3,6 +3,7 @@
 const fs = require("fs");
 const { extractCitationOccurrences } = require("./citationDiagnostics");
 const { isValidCitekey } = require("./citationResults");
+const { parseRegisterContent } = require("./registerStore");
 
 function isPlaceholderCitekey(value) {
   return /^ref\d+$/i.test(String(value || ""));
@@ -14,6 +15,22 @@ function collectCitekeysFromText(text) {
   for (const occurrence of extractCitationOccurrences(String(text || ""))) {
     if (!isPlaceholderCitekey(occurrence.key) && isValidCitekey(occurrence.key)) {
       keys.add(occurrence.key);
+    }
+  }
+
+  return [...keys].sort();
+}
+
+function collectRegisterCitekeys(project) {
+  const registerPath = project.paths && project.paths.referenceRegister;
+  if (!registerPath || !fs.existsSync(registerPath)) {
+    return [];
+  }
+
+  const keys = new Set();
+  for (const entry of parseRegisterContent(fs.readFileSync(registerPath, "utf8"))) {
+    if (isValidCitekey(entry.zoteroKey) && !isPlaceholderCitekey(entry.zoteroKey)) {
+      keys.add(entry.zoteroKey);
     }
   }
 
@@ -44,11 +61,18 @@ function collectProjectCitekeys(project, options = {}) {
     }
   }
 
+  if (options.includeRegisterKeys !== false) {
+    for (const key of collectRegisterCitekeys(project)) {
+      keys.add(key);
+    }
+  }
+
   return [...keys].sort();
 }
 
 module.exports = {
   collectCitekeysFromText,
   collectProjectCitekeys,
+  collectRegisterCitekeys,
   isPlaceholderCitekey
 };

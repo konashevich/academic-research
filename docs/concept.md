@@ -144,7 +144,7 @@ Academic Research: Find Citation for Selection
 - Replace `[citation needed]`
 - Replace placeholder such as `[@ref1]`
 - Add source to Zotero
-- Sync bibliography
+- Sync bibliography (project-scoped citekeys only)
 - Add to reference register for later review
 
 ### 5.3 Reference Register Workflow
@@ -253,7 +253,7 @@ or a status bar action.
   - Add to reference register
   - Insert placeholder
   - Verify citations
-  - Sync bibliography
+  - Sync bibliography (project-scoped citekeys only)
 
 ### 5.6 Verification and Build Workflow
 
@@ -311,7 +311,17 @@ The extension should use Zotero MCP to:
 - search existing library items
 - avoid duplicates
 - import or create items when supported
-- export bibliography content to `refs/bibliography.json`
+- export only project citekeys to `refs/bibliography.json`
+
+Project citekeys are collected from:
+
+- Pandoc citations in the configured manuscript (`[@citekey]`, excluding placeholders such as `[@ref1]`)
+- Zotero keys recorded in `refs/reference-register.md`
+- any key being imported in the current action before it appears in the manuscript
+
+Sync is project-scoped, not a full-library export. If Zotero MCP is disabled, the extension prunes `refs/bibliography.json` to those citekeys using existing local entries only; it does not download new metadata until Zotero MCP is enabled again.
+
+If any requested citekey cannot be refreshed from Zotero, sync fails and the bibliography file is left unchanged.
 
 The extension should never create a local citation key that cannot be resolved through the bibliography.
 

@@ -257,6 +257,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "test:integration": "node --test tests/integration/*.test.js",
     "test:extension": "xvfb-run -a node tests/run-vscode-smoke.js",
     "package": "vsce package --out VSIX/ --allow-missing-repository"
   },

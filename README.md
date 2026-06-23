@@ -53,7 +53,9 @@ Implemented MCP features:
 - Zotero bibliography sync via `zotero_resolve_citekeys` for citekeys used in the manuscript (not the full library)
 - Google Scholar search via `search_google_scholar_key_words`
 
-The Zotero sync exports only citekeys cited in the project manuscript (plus any key being imported), using `zotero_resolve_citekeys` with per-item `zotero_item_metadata` fallback. CSL IDs prefixed with a library id, such as `17365128/ABC123`, are normalized to the item key, such as `ABC123`.
+The Zotero sync exports citekeys from the manuscript, `refs/reference-register.md`, and any key being imported. It uses `zotero_resolve_citekeys` with Better BibTeX and per-item `zotero_item_metadata` fallbacks. If any requested key cannot be refreshed, sync fails and `refs/bibliography.json` is left unchanged.
+
+With Zotero MCP disabled, **Sync Bibliography** only prunes the local file to project citekeys using existing entries; it does not download new metadata.
 
 ### Settings
 
@@ -70,7 +72,17 @@ The Zotero sync exports only citekeys cited in the project manuscript (plus any 
 
 ```bash
 npm test
+npm run test:integration
 npm run test:extension
+```
+
+Optional live Zotero MCP test (skipped unless enabled):
+
+```bash
+ACADEMIC_RESEARCH_LIVE_ZOTERO=1 \
+ACADEMIC_RESEARCH_TEST_CITEKEYS=YOURKEY \
+ACADEMIC_RESEARCH_ZOTERO_PORT=9180 \
+npm run test:integration
 ```
 
 `npm run test:extension` launches VS Code under `xvfb-run` against a temporary copy of `/mnt/merged_ssd/Papers/academic-paper-template`.

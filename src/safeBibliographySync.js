@@ -112,8 +112,13 @@ function writeBibliographySafely(filePath, nextContent, options = {}) {
   };
 }
 
+function buildLocalBibliographyContent(citekeys, existingItems) {
+  return buildProjectBibliographyContent(citekeys, [], existingItems);
+}
+
 module.exports = {
   atomicWriteFile,
+  buildLocalBibliographyContent,
   buildProjectBibliographyContent,
   readExistingBibliography,
   validateBibliographySync,

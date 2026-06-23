@@ -13,7 +13,7 @@ const {
   removeBatch
 } = require("./citationSearchHistoryStore");
 const { CitationSearchHistoryViewProvider } = require("./citationSearchHistoryView");
-const { loadBibliography, searchBibliography, loadBibliographyFromContent } = require("./bibliographyIndex");
+const { loadBibliography, searchBibliography } = require("./bibliographyIndex");
 const { findCitationIssues } = require("./citationDiagnostics");
 const { planCitationInsertion } = require("./citationInsertion");
 const { buildCitationQuery, extractClaimTextFromLine } = require("./citationQuery");
@@ -23,7 +23,7 @@ const { searchOpenAlex } = require("./openAlexClient");
 const { ZoteroMcpClient } = require("./zoteroMcpClient");
 const { ScholarMcpClient } = require("./scholarMcpClient");
 const { renderCitationSearchHtml, truncateText } = require("./citationSearchPanel");
-const { buildProjectBibliographyContent, readExistingBibliography, writeBibliographySafely } = require("./safeBibliographySync");
+const { buildLocalBibliographyContent, readExistingBibliography, writeBibliographySafely } = require("./safeBibliographySync");
 const { collectProjectCitekeys } = require("./projectCitekeys");
 const { registerCitationCodeActions } = require("./citationCodeActions");
 const { createInfrastructureManager, getInfrastructureManager } = require("./infrastructure/infrastructureManager");
@@ -1204,6 +1204,144 @@ function getManuscriptTexts(project) {
   return [];
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function collectSyncCitekeys(project, options = {}) {
+  return collectProjectCitekeys(project, {
+    additionalKeys: options.additionalKeys,
+    manuscriptTexts: getManuscriptTexts(project),
+    includeRegisterKeys: options.includeRegisterKeys
+  });
+}
+
+async function confirmEmptyBibliographySync(project) {
+  const existing = readExistingBibliography(project.paths.bibliography);
+  if (existing.items.length === 0) {
+    return true;
+  }
+
+  const clear = "Clear Bibliography";
+  const picked = await vscode.window.showWarningMessage(
+    `No citekeys found in the manuscript or reference register. This will replace ${existing.items.length} bibliography entries with an empty file.`,
+    { modal: true },
+    clear
+  );
+  return picked === clear;
+}
+
+async function writeProjectBibliography(project, content, citekeyCount, options = {}) {
+  try {
+    return writeBibliographySafely(project.paths.bibliography, content, {
+      projectScoped: true,
+      requestedKeyCount: citekeyCount,
+      ...options
+    });
+  } catch (error) {
+    if (!/^Refusing /.test(error.message)) {
+      throw error;
+    }
+
+    const replace = "Replace Anyway";
+    const picked = await vscode.window.showWarningMessage(error.message, { modal: true }, replace);
+    if (picked !== replace) {
+      logError("Zotero MCP bibliography sync refused", error);
+      return null;
+    }
+
+    return writeBibliographySafely(project.paths.bibliography, content, {
+      allowDangerousReplace: true,
+      projectScoped: true,
+      requestedKeyCount: citekeyCount,
+      ...options
+    });
+  }
+}
+
+async function syncBibliographyLocalOnly(project, options = {}) {
+  const citekeys = collectSyncCitekeys(project, options);
+
+  if (!citekeys.length) {
+    if (!(await confirmEmptyBibliographySync(project))) {
+      return false;
+    }
+    await writeProjectBibliography(project, "[]\n", 0);
+    refreshStatus("synced");
+    vscode.window.showInformationMessage("No project citekeys found; bibliography is now empty.");
+    return true;
+  }
+
+  const existingBibliography = readExistingBibliography(project.paths.bibliography);
+  const local = buildLocalBibliographyContent(citekeys, existingBibliography.items);
+
+  if (local.unresolved.length > 0) {
+    refreshStatus("sync failed");
+    vscode.window.showWarningMessage(
+      `Cannot sync locally: missing bibliography entries for @${local.unresolved.join(", @")}. Enable Zotero MCP to fetch them from your library.`
+    );
+    return false;
+  }
+
+  await writeProjectBibliography(project, local.content, citekeys.length);
+  await refreshDiagnosticsForProject(project);
+  refreshStatus("synced");
+  vscode.window.showInformationMessage(
+    `Pruned bibliography to ${citekeys.length} project citekey(s). Enable Zotero MCP to refresh metadata from Zotero.`
+  );
+  return true;
+}
+
+async function syncBibliographyFromZotero(project, options = {}) {
+  const endpoints = await resolveMcpEndpoints(project);
+  const zotero = new ZoteroMcpClient(endpoints);
+
+  try {
+    const citekeys = collectSyncCitekeys(project, options);
+
+    if (!citekeys.length) {
+      if (!(await confirmEmptyBibliographySync(project))) {
+        return false;
+      }
+    }
+
+    const exportResult = await zotero.exportBibliographyForCitekeys(citekeys);
+    for (const warning of exportResult.warnings || []) {
+      outputChannel.appendLine(warning);
+    }
+
+    const zoteroUnresolved = exportResult.unresolved || [];
+
+    if (citekeys.length > 0 && zoteroUnresolved.length > 0) {
+      refreshStatus("sync incomplete");
+      vscode.window.showWarningMessage(
+        `Could not refresh @${zoteroUnresolved.join(", @")} from Zotero. Bibliography unchanged.`
+      );
+      return false;
+    }
+
+    if (!citekeys.length) {
+      await writeProjectBibliography(project, "[]\n", 0);
+      await refreshDiagnosticsForProject(project);
+      refreshStatus("synced");
+      vscode.window.showInformationMessage("No project citekeys found in the manuscript or reference register; bibliography is now empty.");
+      return true;
+    }
+
+    let writeResult = await writeProjectBibliography(project, exportResult.content, citekeys.length);
+    if (!writeResult) {
+      return false;
+    }
+
+    await refreshDiagnosticsForProject(project);
+    refreshStatus("synced");
+    vscode.window.showInformationMessage(`Synced ${writeResult.nextCount || exportResult.count} project citekey(s) from Zotero.`);
+    return true;
+  } finally {
+    await zotero.close();
+  }
+}
+
 async function syncBibliography(project = getCurrentProject(), options = {}) {
   if (!project.found) {
     vscode.window.showWarningMessage("Bibliography sync needs a workspace with paper.yaml.");
@@ -1219,18 +1357,10 @@ async function syncBibliography(project = getCurrentProject(), options = {}) {
   }
 
   if (!config.get("enableZoteroMcp", true)) {
-    if (!project.makeTargets.includes("sync")) {
-      vscode.window.showWarningMessage("Make target 'sync' was not found in this project.");
-      return false;
-    }
-    const result = await runMakeTargetCaptured(project, "sync");
-    const ok = result.exitCode === 0;
-    refreshStatus(ok ? "synced" : "sync failed");
-    if (!ok) {
-      vscode.window.showWarningMessage("Bibliography sync failed. See the Academic Research output.");
-    }
-    return ok;
+    return syncBibliographyLocalOnly(project, options);
   }
+
+  const maxAttempts = options.retries ?? (options.additionalKeys?.length ? 4 : 1);
 
   return vscode.window.withProgress(
     {
@@ -1239,105 +1369,29 @@ async function syncBibliography(project = getCurrentProject(), options = {}) {
       cancellable: false
     },
     async () => {
-      const endpoints = await resolveMcpEndpoints(project);
-      const zotero = new ZoteroMcpClient(endpoints);
-      try {
-        const citekeys = collectProjectCitekeys(project, {
-          additionalKeys: options.additionalKeys,
-          manuscriptTexts: getManuscriptTexts(project)
-        });
-
-        if (!citekeys.length) {
-          const existing = readExistingBibliography(project.paths.bibliography);
-          if (existing.items.length > 0) {
-            const clear = "Clear Bibliography";
-            const picked = await vscode.window.showWarningMessage(
-              `No citekeys found in the manuscript. This will replace ${existing.items.length} bibliography entries with an empty file.`,
-              { modal: true },
-              clear
-            );
-            if (picked !== clear) {
-              return false;
-            }
-          }
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (attempt > 1) {
+          outputChannel.appendLine(`Retrying bibliography sync (attempt ${attempt}/${maxAttempts})...`);
+          await delay(600 * attempt);
         }
 
-        const exportResult = await zotero.exportBibliographyForCitekeys(citekeys);
-        for (const warning of exportResult.warnings || []) {
-          outputChannel.appendLine(warning);
-        }
-
-        const existingBibliography = readExistingBibliography(project.paths.bibliography);
-        const freshItems = loadBibliographyFromContent(exportResult.content);
-        const zoteroUnresolved = exportResult.unresolved || [];
-        let contentToWrite = exportResult.content;
-        let mergeInfo = null;
-
-        if (zoteroUnresolved.length > 0 && citekeys.length > 0) {
-          mergeInfo = buildProjectBibliographyContent(citekeys, freshItems, existingBibliography.items);
-          contentToWrite = mergeInfo.content;
-          for (const key of mergeInfo.preservedFromExisting) {
-            outputChannel.appendLine(`Kept existing bibliography entry for unresolved @${key}.`);
-          }
-        }
-
-        let writeResult;
         try {
-          writeResult = writeBibliographySafely(project.paths.bibliography, contentToWrite, {
-            projectScoped: true,
-            requestedKeyCount: citekeys.length
-          });
+          if (await syncBibliographyFromZotero(project, options)) {
+            return true;
+          }
         } catch (error) {
-          if (!/^Refusing /.test(error.message)) {
-            throw error;
+          logError("Zotero MCP bibliography sync failed", error);
+          if (attempt === maxAttempts) {
+            vscode.window.showWarningMessage("Zotero MCP sync failed. See the Academic Research output.");
           }
-          const replace = "Replace Anyway";
-          const picked = await vscode.window.showWarningMessage(error.message, { modal: true }, replace);
-          if (picked !== replace) {
-            logError("Zotero MCP bibliography sync refused", error);
-            return false;
-          }
-          writeResult = writeBibliographySafely(project.paths.bibliography, contentToWrite, {
-            allowDangerousReplace: true,
-            projectScoped: true,
-            requestedKeyCount: citekeys.length
-          });
         }
 
-        await refreshDiagnosticsForProject(getCurrentProject());
-        const syncedCount = writeResult.nextCount || exportResult.count;
-        const stillMissing = mergeInfo ? mergeInfo.unresolved : zoteroUnresolved;
-        const syncComplete = stillMissing.length === 0;
-
-        if (!citekeys.length) {
-          refreshStatus("synced");
-          vscode.window.showInformationMessage("No project citekeys found in the manuscript; bibliography is now empty.");
-          return true;
+        if (!options.additionalKeys?.length) {
+          break;
         }
-
-        if (!syncComplete) {
-          refreshStatus("sync incomplete");
-          const preserved = mergeInfo?.preservedFromExisting || [];
-          const refreshed = mergeInfo?.refreshedCount ?? (syncedCount - preserved.length);
-          let message = `Bibliography partially updated: refreshed ${refreshed} of ${citekeys.length} project citekey(s).`;
-          if (preserved.length) {
-            message += ` Kept existing entries for @${preserved.join(", @")}.`;
-          }
-          message += ` Still missing from Zotero: @${stillMissing.join(", @")}.`;
-          vscode.window.showWarningMessage(message);
-          return false;
-        }
-
-        refreshStatus("synced");
-        vscode.window.showInformationMessage(`Synced ${syncedCount} project citekey(s) from Zotero.`);
-        return true;
-      } catch (error) {
-        logError("Zotero MCP bibliography sync failed", error);
-        vscode.window.showWarningMessage("Zotero MCP sync failed. See the Academic Research output.");
-        return false;
-      } finally {
-        await zotero.close();
       }
+
+      return false;
     }
   );
 }
